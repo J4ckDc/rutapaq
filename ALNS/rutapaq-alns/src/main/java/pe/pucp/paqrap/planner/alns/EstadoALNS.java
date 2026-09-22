@@ -16,14 +16,11 @@ import pe.pucp.paqrap.planner.core.RedVial;
 import pe.pucp.paqrap.planner.core.ResultadoFactibilidad;
 import pe.pucp.paqrap.planner.core.ValidadorFactibilidad;
 import pe.pucp.paqrap.planner.model.Almacen;
-import pe.pucp.paqrap.planner.model.EstadoPedido;
 import pe.pucp.paqrap.planner.model.EstadoVehiculo;
-import pe.pucp.paqrap.planner.model.NivelSemaforo;
 import pe.pucp.paqrap.planner.model.NodoRed;
 import pe.pucp.paqrap.planner.model.Pedido;
 import pe.pucp.paqrap.planner.model.PlanDistribucion;
 import pe.pucp.paqrap.planner.model.Ruta;
-import pe.pucp.paqrap.planner.model.TipoAlmacen;
 import pe.pucp.paqrap.planner.model.TransferenciaCarga;
 import pe.pucp.paqrap.planner.model.Vehiculo;
 import pe.pucp.paqrap.planner.model.VisitaCliente;
@@ -519,61 +516,10 @@ public final class EstadoALNS {
 
     public PlanDistribucion construirPlan() {
         PlanDistribucion plan = new PlanDistribucion();
-        double costo = 0.0;
-        double distancia = 0.0;
-        int total = 0;
-        int enPlazo = 0;
         for (Ruta ruta : rutas) {
-            Ruta copia = ruta.copia();
-            plan.getListaRutas().add(copia);
-            costo += copia.getCostoTotalRuta();
-            distancia += copia.getDistanciaTotalKm();
-            for (VisitaCliente v : copia.getListaParadas()) {
-                Pedido p = v.getPedido();
-                p.setEstado(EstadoPedido.ASIGNADO);
-                p.setIdVehiculoAsignado(copia.getVehiculo().getIdVehiculo());
-                plan.getPedidosAtendidos().add(p);
-                total++;
-                if (v.getHolguraHoras() >= 0.0) {
-                    enPlazo++;
-                }
-            }
-        }
-        for (Pedido p : pedidosNoAtendidos) {
-            p.setEstado(EstadoPedido.NO_ATENDIDO);
-            plan.getPedidosNoAtendidos().add(p);
-            total++;
+            plan.getListaRutas().add(ruta.copia());
         }
         plan.getTransferencias().addAll(transferencias);
-        plan.setCostoTotalGlobal(costo);
-        plan.setDistanciaTotalGlobalKm(distancia);
-        double sla = total == 0 ? 1.0 : enPlazo / (double) total;
-        plan.setIndicadorPuntualidadSLA(sla);
-        plan.setSemaforoOperativo(semaforo(sla));
-        for (Almacen a : contexto.getAlmacenes()) {
-            if (a.getTipoAlmacen() == TipoAlmacen.INTERMEDIO) {
-                plan.getEstadoAlmacenes().put(a.getIdAlmacen(),
-                        a.getCapacidadActual() - consumoAlmacen(a.getIdAlmacen()));
-            }
-        }
-        plan.setTimestampGeneracion(contexto.getInstante());
-        return plan;
-    }
-
-    /** Semaforo operativo con umbrales configurables (requisito no funcional d). */
-    private NivelSemaforo semaforo(double sla) {
-        double saldoCritico = 1.0;
-        for (Almacen a : contexto.getAlmacenes()) {
-            if (a.getTipoAlmacen() == TipoAlmacen.INTERMEDIO && a.getCapacidadMaxima() > 0) {
-                double ratio = (a.getCapacidadActual() - consumoAlmacen(a.getIdAlmacen()))
-                        / (double) a.getCapacidadMaxima();
-                saldoCritico = Math.min(saldoCritico, ratio);
-            }
-        }
-        double indicador = Math.min(sla, saldoCritico);
-        if (indicador >= cfg.umbralSemaforoVerde()) {
-            return NivelSemaforo.VERDE;
-        }
-        return indicador >= cfg.umbralSemaforoAmbar() ? NivelSemaforo.AMBAR : NivelSemaforo.ROJO;
+        return pe.pucp.paqrap.planner.core.IndicadoresPlan.completar(plan, contexto, pedidosNoAtendidos);
     }
 }

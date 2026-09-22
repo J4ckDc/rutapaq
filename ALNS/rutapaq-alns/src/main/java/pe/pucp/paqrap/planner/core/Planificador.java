@@ -15,4 +15,7 @@ public interface Planificador {
 
     /** Numero de iteraciones o generaciones efectivamente ejecutadas en la ultima corrida. */
     int iteracionesEjecutadas();
+
+    /** Tiempo de computo de la ultima invocacion, en milisegundos. */
+    long tiempoUltimaCorridaMs();
 }

@@ -80,7 +80,7 @@ class ALNS_PAQRAPTest {
                 "t2", ctx, inst.pedidos(), List.of(), null));
         ctx.setInstante(ctx.getInstante().plusMinutes(90));
         List<Incidencia> incidencias = generador.generarIncidencias(
-                ctx, plan.getListaRutas(), 2, 1, ctx.getInstante());
+                ctx, 2, 1, ctx.getInstante());
 
         PlanDistribucion replanificado = alns.resolver(new InstanciaEscenario(
                 "t2-reopt", ctx, List.of(), incidencias, plan));

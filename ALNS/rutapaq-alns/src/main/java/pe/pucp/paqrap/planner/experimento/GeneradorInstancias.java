@@ -16,7 +16,6 @@ import pe.pucp.paqrap.planner.model.Arco;
 import pe.pucp.paqrap.planner.model.Incidencia;
 import pe.pucp.paqrap.planner.model.NodoRed;
 import pe.pucp.paqrap.planner.model.Pedido;
-import pe.pucp.paqrap.planner.model.Ruta;
 import pe.pucp.paqrap.planner.model.TipoAlmacen;
 import pe.pucp.paqrap.planner.model.TipoNodo;
 import pe.pucp.paqrap.planner.model.TipoVehiculo;
@@ -193,33 +192,23 @@ public final class GeneradorInstancias {
 
     /**
      * Incidencias para la fase de reoptimizacion: bloqueos de calles sobre arcos
-     * efectivamente usados por el plan y fallas mecanicas de unidades en ruta.
+     * de la malla y fallas mecanicas de unidades de la flota. Se generan sin
+     * consultar el plan vigente, de modo que el ALNS y el HGS/GA enfrentan
+     * exactamente los mismos eventos disruptivos para una misma semilla.
      */
-    public List<Incidencia> generarIncidencias(ContextoPlanificacion ctx, List<Ruta> rutas,
-                                               int bloqueos, int averias, LocalDateTime instante) {
+    public List<Incidencia> generarIncidencias(ContextoPlanificacion ctx, int bloqueos, int averias,
+                                               LocalDateTime instante) {
         List<Incidencia> incidencias = new ArrayList<>();
         List<Arco> calles = ctx.getRedVial().getCalles();
+        calles.sort(java.util.Comparator.comparing(Arco::toString));
         for (int i = 1; i <= bloqueos && !calles.isEmpty(); i++) {
-            Arco arco = calles.get(rnd.nextInt(calles.size()));
+            Arco arco = calles.remove(rnd.nextInt(calles.size()));
             incidencias.add(Incidencia.bloqueoCalle("BLQ-" + i, arco, instante,
                     cfg.numero("instancia.duracionBloqueoHoras", 2.0)));
         }
-        List<Ruta> conCarga = new ArrayList<>();
-        for (Ruta r : rutas) {
-            if (r.tieneVisitasNoCongeladas()) {
-                conCarga.add(r);
-            }
-        }
-        for (int i = 1; i <= averias && !conCarga.isEmpty(); i++) {
-            Ruta ruta = conCarga.remove(rnd.nextInt(conCarga.size()));
-            Vehiculo v = ctx.vehiculo(ruta.getVehiculo().getIdVehiculo());
-            if (v == null) {
-                continue;
-            }
-            v.setCargaActual(ruta.getCarga());
-            if (!ruta.getListaParadas().isEmpty()) {
-                v.setUbicacionActual(ruta.getListaParadas().get(0).getNodoCliente());
-            }
+        List<Vehiculo> flota = new ArrayList<>(ctx.getFlota());
+        for (int i = 1; i <= averias && !flota.isEmpty(); i++) {
+            Vehiculo v = flota.remove(rnd.nextInt(flota.size()));
             incidencias.add(Incidencia.fallaMecanica("FAL-" + i, v.getIdVehiculo(), instante,
                     cfg.numero("instancia.duracionAveriaHoras", 3.0)));
         }

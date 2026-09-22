@@ -78,6 +78,7 @@ public final class ALNS_PAQRAP implements Planificador {
         return iteracionesEjecutadas;
     }
 
+    @Override
     public long tiempoUltimaCorridaMs() {
         return tiempoUltimaCorridaMs;
     }
