@@ -1,0 +1,12 @@
+Carpeta de datos del experimento.
+
+Coloque aqui los archivos oficiales del curso:
+  ventas.aaaamm.txt   (historial de ventas, version v20260909)
+  bloqueo.aamm.txt    (bloqueos planificados, version v20260909)
+
+Mientras no esten disponibles, genere un historial sintetico con:
+  java -cp target/classes pe.pucp.paqrap.planner.ien.RunnerIEN --solo-generar
+
+El historial sintetico reproduce las caracteristicas de las Tablas 5 y 6 del IEN,
+pero sus cargas por bloque NO coinciden con la Tabla 7: sirve para verificar el
+banco de pruebas, no para obtener los resultados definitivos.
