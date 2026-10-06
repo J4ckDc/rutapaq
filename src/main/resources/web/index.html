@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RUTAPAQ – Visualizador</title>
+  <link rel="stylesheet" href="estilos.css">
+</head>
+<body>
+<aside id="panel">
+  <header>
+    <h1>RUTAPAQ</h1>
+    <span id="conexion" class="punto" title="Conexión con el servidor"></span>
+  </header>
+
+  <section>
+    <h2>Escenario</h2>
+    <div class="fila">
+      <select id="escenario">
+        <option value="SEMANAL">Simulación de 5 días</option>
+        <option value="COLAPSO">Simulación hasta el colapso</option>
+        <option value="DIA_A_DIA">Operación día a día</option>
+      </select>
+      <input id="fecha" type="date">
+    </div>
+    <div class="fila">
+      <button id="iniciar">Iniciar</button>
+      <button id="detener" class="secundario">Detener</button>
+    </div>
+    <p id="mensaje" class="nota"></p>
+  </section>
+
+  <section>
+    <h2>Reloj</h2>
+    <div id="reloj">—</div>
+    <div id="detalleReloj" class="nota"></div>
+  </section>
+
+  <section>
+    <h2>Indicadores</h2>
+    <ul id="indicadores"></ul>
+  </section>
+
+  <section>
+    <h2>Selección</h2>
+    <div id="seleccion" class="nota">Haga clic en una unidad o un pedido del mapa.</div>
+  </section>
+
+  <section id="registro">
+    <h2>Registrar pedido</h2>
+    <div class="fila">
+      <label>x <input id="px" type="number" min="0" max="70" value="10"></label>
+      <label>y <input id="py" type="number" min="0" max="50" value="10"></label>
+    </div>
+    <div class="fila">
+      <label>Cantidad <input id="pcant" type="number" min="1" value="5"></label>
+      <label>Plazo
+        <select id="pplazo"><option>4</option><option>8</option><option>12</option><option>18</option><option selected>36</option></select> h
+      </label>
+    </div>
+    <button id="registrar">Registrar</button>
+  </section>
+
+  <section class="leyenda">
+    <span><i class="g auto"></i>Auto</span>
+    <span><i class="g moto"></i>Moto</span>
+    <span><i class="g bici"></i>Bicicleta</span>
+    <span><i class="g alm"></i>Almacén</span>
+    <span><i class="g bloq"></i>Bloqueo</span>
+    <span><i class="c VERDE"></i><i class="c AMBAR"></i><i class="c ROJO"></i>Pedido según plazo</span>
+    <p class="nota">Rueda: acercar · Arrastrar: desplazar · Doble clic: vista completa</p>
+  </section>
+</aside>
+
+<main>
+  <canvas id="mapa"></canvas>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
