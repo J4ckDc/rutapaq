@@ -1,0 +1,14 @@
+# /etc/systemd/system/rutapaq.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now rutapaq
+[Unit]
+Description=RUTAPAQ - planificador y visualizador
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/rutapaq
+ExecStart=/usr/bin/java -Xmx1536m -jar /opt/rutapaq/rutapaq.jar
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
