@@ -27,7 +27,7 @@ import pe.pucp.paqrap.planner.core.MapaReticula;
 public final class LectorBloqueos {
 
     private static final Pattern PATRON =
-            Pattern.compile("^\\s*(\\d+)D(\\d+)H(\\d+)-(\\d+)D(\\d+)H(\\d+):(.+)$");
+            Pattern.compile("^\\s*(\\d+)[dD](\\d+)[hH](\\d+)[mM]?-(\\d+)[dD](\\d+)[hH](\\d+)[mM]?:(.+)$");   // v02: acepta 01d01h30m (formato del profesor)
 
     private LectorBloqueos() {
     }

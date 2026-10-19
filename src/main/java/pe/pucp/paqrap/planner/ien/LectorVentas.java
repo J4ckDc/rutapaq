@@ -24,7 +24,7 @@ import pe.pucp.paqrap.planner.model.Pedido;
 public final class LectorVentas {
 
     private static final Pattern PATRON =
-            Pattern.compile("^\\s*(\\d+)D(\\d+)H(\\d+):([^,]+),([^,]+),([^,]+),(\\d+),(\\d+)\\s*$");
+            Pattern.compile("^\\s*(\\d+)[dD](\\d+)[hH](\\d+)[mM]?:([^,]+),([^,]+),([^,]+),(\\d+),(\\d+)\\s*$");   // v02: acepta 01d01h30m (formato del profesor)
 
     private LectorVentas() {
     }

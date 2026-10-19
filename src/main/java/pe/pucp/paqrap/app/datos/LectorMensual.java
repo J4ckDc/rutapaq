@@ -27,6 +27,7 @@ final class LectorMensual<T> {
     private BufferedReader lector;
     private T siguiente;
     private long errores;
+    private int numLinea;
 
     LectorMensual(Path carpeta, YearMonth mesInicial, Function<YearMonth, String> nombre,
                   BiFunction<YearMonth, String, T> parser, Function<T, LocalDateTime> instante) {
@@ -70,14 +71,21 @@ final class LectorMensual<T> {
                 lector.close();
                 lector = null;
                 mes = mes.plusMonths(1);
+                numLinea = 0;
                 continue;
             }
+            numLinea++;
             linea = linea.trim();
             if (linea.isEmpty() || linea.startsWith("#")) continue;
             try {
                 return parser.apply(mes, linea);
             } catch (RuntimeException e) {
+                // v02: la línea inválida ya no se descarta en silencio; se cuenta y se informa en consola
+                // (las primeras 5) y el visualizador muestra cuántas hubo.
                 errores++;
+                if (errores <= 5) {
+                    System.err.printf("Línea inválida en %s, línea %d: %s%n", nombre.apply(mes), numLinea, linea);
+                }
             }
         }
     }

@@ -1,12 +1,18 @@
-Carpeta de datos del experimento.
+Carpeta de datos de RUTAPAQ (v02).
 
-Coloque aqui los archivos oficiales del curso:
-  ventas.aaaamm.txt   (historial de ventas, version v20260909)
-  bloqueo.aamm.txt    (bloqueos planificados, version v20260909)
+Contiene los archivos publicados por el profesor (versión v20260909), enero 2026 a diciembre 2028:
 
-Mientras no esten disponibles, genere un historial sintetico con:
-  java -cp target/classes pe.pucp.paqrap.planner.ien.RunnerIEN --solo-generar
+  ventas.aaaamm.txt          pedidos     ##d##h##m:x,y,idCliente,cantidad,plazoHoras
+                                         ej. 01d01h30m:56,30,c4910,02,36
+  bloqueo.aamm.txt           bloqueos    ##d##h##m-##d##h##m:x1,y1,x2,y2,...
+                                         ej. 01d02h22m-01d04h42m:25,45,45,45,45,40
+  mant.preventivo.09.10.txt  mantenimiento preventivo, aaaammdd:TTNN  (ej. 20260901:TA01)
+                             El plan es bimensual y se repite cada 2 meses: setiembre vale para
+                             los meses impares y octubre para los pares.
 
-El historial sintetico reproduce las caracteristicas de las Tablas 5 y 6 del IEN,
-pero sus cargas por bloque NO coinciden con la Tabla 7: sirve para verificar el
-banco de pruebas, no para obtener los resultados definitivos.
+Para usar otra versión de los datos, reemplace los archivos manteniendo los nombres.
+Si una línea no tiene el formato esperado, el servidor la informa en la consola y el
+visualizador muestra cuántas líneas se descartaron.
+
+Los archivos sintéticos de la v01 (formato 01D01H052) ya no se usan, pero se siguen
+aceptando por compatibilidad.
