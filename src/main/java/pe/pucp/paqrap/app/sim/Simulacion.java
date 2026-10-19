@@ -4,6 +4,7 @@ import pe.pucp.paqrap.app.Config;
 import pe.pucp.paqrap.app.datos.Bloqueo;
 import pe.pucp.paqrap.app.datos.Formato;
 import pe.pucp.paqrap.app.datos.FuenteDatos;
+import pe.pucp.paqrap.app.datos.PlanMantenimiento;
 import pe.pucp.paqrap.app.modelo.Almacen;
 import pe.pucp.paqrap.app.modelo.Nodo;
 import pe.pucp.paqrap.app.modelo.Parada;
@@ -26,6 +27,7 @@ import pe.pucp.paqrap.planner.model.Vehiculo;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -45,12 +47,19 @@ import java.util.Set;
  *   - el plan devuelto (entregas, recargas y refrigerios) pasa a ser el itinerario de cada unidad.
  * Entre ciclos, las unidades recorren la retícula nodo a nodo y ejecutan su itinerario.
  * Todo el acceso al estado está sincronizado sobre este objeto.
+ *
+ * Cambios v02:
+ *   - Detener ya no termina la simulación: la deja PAUSADA y se puede reanudar (pausar / reanudar).
+ *   - Mantenimiento preventivo: la unidad no recibe rutas que crucen su día de mantenimiento y,
+ *     durante ese día (00:00 a 23:59), queda en el almacén central fuera de servicio.
+ *   - Si el planificador falla, las unidades conservan su itinerario anterior.
+ *   - El % a tiempo cuenta también los pedidos vencidos que aún no se entregan.
  */
 public final class Simulacion implements Runnable {
 
     public enum Escenario { DIA_A_DIA, SEMANAL, COLAPSO }
 
-    public enum Estado { PREPARADA, EJECUTANDO, TERMINADA }
+    public enum Estado { PREPARADA, EJECUTANDO, PAUSADA, TERMINADA }
 
     private static final double PASO_MAX_SEG = 30.0;      // granularidad del movimiento
     private static final long TICK_MS = 100;              // cada cuánto avanza el reloj real
@@ -68,6 +77,7 @@ public final class Simulacion implements Runnable {
     private final List<Bloqueo> bloqueosActivos = new ArrayList<>();
     private final Planificador planificador;
     private final FuenteDatos fuente;
+    private final PlanMantenimiento mantenimiento;
     private final Indicadores semaforo;
 
     private final double factor;          // segundos simulados por segundo real
@@ -76,12 +86,14 @@ public final class Simulacion implements Runnable {
     private final double margenSeg;       // holgura opcional frente al límite de cada pedido
     private final int maximoPorEntrega;   // entregas parciales
     private final double duracionSeg;     // 5D: 120 h
+    private final double horizonteRutaSeg; // una ruta no dura más que esto (mantenimiento)
 
     private double t;
     private double proximoCiclo;
     private LocalDateTime proximaRecarga;
     private volatile Estado estado = Estado.PREPARADA;
-    private volatile boolean detener;
+    private volatile boolean cancelada;    // al iniciar otra simulación, esta termina
+    private long nsReales;                 // tiempo real en ejecución, sin contar pausas
     private String motivoFin = "";
     private double tcHoras = -1;
 
@@ -97,6 +109,7 @@ public final class Simulacion implements Runnable {
         this.planificador = planificador;
         this.semaforo = new Indicadores(cfg);
         this.fuente = new FuenteDatos(Path.of(cfg.texto("datos.carpeta", "datos")), inicio);
+        this.mantenimiento = new PlanMantenimiento(Path.of(cfg.texto("datos.carpeta", "datos")));
         this.mapa = new MapaReticula(cfg.entero("ien.mapaAnchoKm", 70), cfg.entero("ien.mapaAltoKm", 50));
         this.caminos = new Caminos(mapa);
 
@@ -105,6 +118,7 @@ public final class Simulacion implements Runnable {
         this.margenSeg = cfg.decimal("planificador.margenMinutos", 0) * 60;
         this.maximoPorEntrega = cfg.entero("ien.maximoProductosPorEntrega", 24);
         this.duracionSeg = escenario == Escenario.SEMANAL ? 5 * 24 * 3600 : Double.POSITIVE_INFINITY;
+        this.horizonteRutaSeg = cfg.decimal("planificador.horizonteRutaHoras", 8) * 3600;
         this.factor = switch (escenario) {
             case SEMANAL -> duracionSeg / (cfg.decimal("escenario.semanal.minutosReales", 30) * 60);
             case COLAPSO -> cfg.decimal("escenario.colapso.factor", 600);
@@ -144,8 +158,23 @@ public final class Simulacion implements Runnable {
 
     // ------------------------------------------------------------------ hilo
 
-    public void detener() {
-        detener = true;
+    /** Botón Detener (v02): congela el reloj simulado; todo el estado se conserva para reanudar. */
+    public synchronized boolean pausar() {
+        if (estado != Estado.EJECUTANDO) return false;
+        estado = Estado.PAUSADA;
+        return true;
+    }
+
+    /** Botón Reanudar (v02): la simulación sigue exactamente desde el instante en que se detuvo. */
+    public synchronized boolean reanudar() {
+        if (estado != Estado.PAUSADA) return false;
+        estado = Estado.EJECUTANDO;
+        return true;
+    }
+
+    /** Termina la simulación definitivamente (se usa al iniciar otra). */
+    public void cancelar() {
+        cancelada = true;
     }
 
     public Estado estado() {
@@ -159,12 +188,18 @@ public final class Simulacion implements Runnable {
     @Override
     public void run() {
         estado = Estado.EJECUTANDO;
+        long ultimo = System.nanoTime();
         try {
-            while (!detener && estado == Estado.EJECUTANDO) {
+            while (!cancelada && estado != Estado.TERMINADA) {
                 Thread.sleep(TICK_MS);
+                long ahoraNs = System.nanoTime();
                 synchronized (this) {
-                    avanzar(factor * TICK_MS / 1000.0);
+                    if (estado == Estado.EJECUTANDO) {      // en pausa el reloj simulado no avanza
+                        nsReales += ahoraNs - ultimo;
+                        avanzar(factor * TICK_MS / 1000.0);
+                    }
                 }
+                ultimo = ahoraNs;
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -175,7 +210,7 @@ public final class Simulacion implements Runnable {
             }
         } finally {
             synchronized (this) {
-                if (estado != Estado.TERMINADA) terminar("Detenida por el usuario");
+                if (estado != Estado.TERMINADA) terminar("Reemplazada por una nueva simulación");
             }
             try {
                 fuente.close();
@@ -238,6 +273,14 @@ public final class Simulacion implements Runnable {
             proximaRecarga = proximaRecarga.plusDays(1);
         }
 
+        // 3b. mantenimiento preventivo (v02): entra a las 00:00 del día indicado y sale al terminar el día
+        LocalDate hoy = ahora.toLocalDate();
+        for (Unidad u : unidades) {
+            boolean toca = mantenimiento.enMantenimiento(u.id, hoy);
+            if (toca && !u.enMantenimiento) entrarMantenimiento(u);
+            else if (!toca && u.enMantenimiento) u.enMantenimiento = false;   // vuelve disponible en el central
+        }
+
         // 4. ciclo de planificación
         if (t >= proximoCiclo) {
             planificar();
@@ -267,6 +310,29 @@ public final class Simulacion implements Runnable {
         if (t >= duracionSeg) terminar("Fin de la simulación de 5 días");
     }
 
+    /**
+     * Inicio del día de mantenimiento. La planificación ya evita asignarle rutas que crucen las 00:00
+     * (ver planificar), así que normalmente la unidad está libre. Si aún tuviera paradas, según el curso
+     * "debe retornar de inmediato": sus entregas pendientes vuelven a planificarse y la unidad pasa al
+     * almacén central con su carga (traslado instantáneo, como en las averías tipo 2 y 3).
+     */
+    private void entrarMantenimiento(Unidad u) {
+        for (Parada p : u.paradas) {
+            if (p.tipo() == Parada.Tipo.ENTREGA) {
+                Pedido ped = pedidos.get(p.pedidoId());
+                if (ped != null) ped.asignado -= p.cantidad();
+            }
+        }
+        u.paradas.clear();
+        u.camino.clear();
+        u.progreso = 0;
+        u.carga = 0;
+        u.nodo = almacenes.get(0).nodo;
+        u.ocupadoHasta = t;
+        u.ocupacion = "";
+        u.enMantenimiento = true;
+    }
+
     private void agregarPedido(String cliente, Nodo nodo, int cantidad, int plazoHoras, double registro) {
         if (!mapa.dentro(nodo.x(), nodo.y()) || cantidad <= 0) return;
         String id = "P" + (++contador);
@@ -286,13 +352,24 @@ public final class Simulacion implements Runnable {
     private void planificar() {
         ciclos++;
 
+        // v02: copia de los itinerarios por si el planificador falla (se restauran en el paso e)
+        Map<Unidad, List<Parada>> antes = new HashMap<>();
+        for (Unidad u : unidades) antes.put(u, new ArrayList<>(u.paradas));
+
         // a) cada unidad conserva solo la parada hacia la que ya se mueve; el resto se replanifica
         for (Unidad u : unidades) recortar(u);
 
         // b) estado de la flota tal como lo espera el planificador
+        //    v02: no reciben rutas las unidades en mantenimiento ni las que entran a mantenimiento antes
+        //    de que termine el horizonte de ruta (así ninguna ruta cruza las 00:00 de su mantenimiento).
         Map<String, Integer> reservado = new HashMap<>();
         List<Vehiculo> flota = new ArrayList<>();
-        for (Unidad u : unidades) flota.add(vehiculo(u, reservado));
+        LocalDateTime finHorizonte = instante(t + horizonteRutaSeg);
+        for (Unidad u : unidades) {
+            Vehiculo v = vehiculo(u, reservado);   // siempre: reserva el stock de sus recargas conservadas
+            boolean disponible = !u.enMantenimiento && !mantenimiento.empiezaEntre(u.id, instante(t), finHorizonte);
+            if (disponible) flota.add(v);
+        }
 
         // c) almacenes con el saldo que queda tras las recargas ya comprometidas
         List<pe.pucp.paqrap.planner.model.Almacen> alm = new ArrayList<>();
@@ -326,11 +403,15 @@ public final class Simulacion implements Runnable {
             plan = planificador.planificar(new InstanciaPlanificacion(mapa, alm, flota, cartera, instante(t),
                     cfg.planificador()));
         } catch (RuntimeException e) {
+            // v02: en la v01 las unidades quedaban sin tareas hasta el siguiente ciclo porque recortar()
+            // ya había borrado sus paradas. Ahora conservan su itinerario anterior.
             ultimoError = "Planificador: " + e;
+            restaurar(antes);
             return;
         }
         msUltimoPlan = (System.nanoTime() - ini) / 1_000_000;
         msMaximoPlan = Math.max(msMaximoPlan, msUltimoPlan);
+        ultimoError = "";                                    // v02: el planificador volvió a funcionar
         iteraciones = planificador.iteracionesEjecutadas();
         sinPlanificar = plan.getNoPlanificados().size();
         if (escenario == Escenario.COLAPSO && msUltimoPlan >= saMs) {
@@ -369,6 +450,25 @@ public final class Simulacion implements Runnable {
                 ultimo = n;
             }
             if (refrigerio) u.paradas.addLast(Parada.refrigerio(ultimo));
+        }
+    }
+
+    /**
+     * v02: deshace recortar() cuando el planificador falla. recortar() conserva un prefijo de las paradas
+     * y libera el resto; aquí se devuelven esas paradas y sus pedidos vuelven a quedar asignados.
+     */
+    private void restaurar(Map<Unidad, List<Parada>> antes) {
+        for (Unidad u : unidades) {
+            List<Parada> previas = antes.get(u);
+            for (int i = u.paradas.size(); i < previas.size(); i++) {
+                Parada p = previas.get(i);
+                if (p.tipo() == Parada.Tipo.ENTREGA) {
+                    Pedido ped = pedidos.get(p.pedidoId());
+                    if (ped != null) ped.asignado += p.cantidad();
+                }
+            }
+            u.paradas.clear();
+            u.paradas.addAll(previas);
         }
     }
 
@@ -527,49 +627,117 @@ public final class Simulacion implements Runnable {
 
     // ------------------------------------------------------------------ lectura del estado
 
+    /** Pedidos cuyo plazo ya venció y que todavía no terminan de entregarse. */
+    private int vencidosSinEntregar() {
+        int n = 0;
+        for (Pedido p : pedidos.values()) if (p.vencido && !p.completo()) n++;
+        return n;
+    }
+
+    /**
+     * % de pedidos a tiempo. v02: el denominador incluye los pedidos vencidos que aún no se entregan.
+     * En la v01 era enPlazo / completados, así que un pedido atrasado que nunca llegaba no bajaba el %.
+     * (Un pedido vencido que luego se completa ya está en "completados", sin contar en enPlazo.)
+     */
+    private double pctATiempo() {
+        int base = completados + vencidosSinEntregar();
+        return base == 0 ? 100.0 : 100.0 * enPlazo / base;
+    }
+
+    private String estadoUnidad(Unidad u) {
+        if (u.enMantenimiento) return "MANTENIMIENTO";
+        if (!u.ocupacion.isEmpty()) return u.ocupacion;          // ENTREGANDO o REFRIGERIO
+        return u.paradas.isEmpty() ? "DISPONIBLE" : "EN_RUTA";
+    }
+
+    private static String nombreAlmacen(String id) {
+        return switch (id) {
+            case "ALM-CENTRAL" -> "Almacén Central";
+            case "ALM-NOROESTE" -> "Nor-Oeste";
+            case "ALM-ESTE" -> "Este";
+            default -> id;
+        };
+    }
+
+    /** Foto completa del estado que se envía a los navegadores (cada visualizador.publicacionMs). */
     public synchronized String snapshotJson() {
-        StringBuilder b = new StringBuilder(64_000);
+        StringBuilder b = new StringBuilder(96_000);
         b.append("{\"estado\":").append(Json.str(estado.name()))
                 .append(",\"escenario\":").append(Json.str(escenario.name()))
                 .append(",\"algoritmo\":").append(Json.str(planificador.nombre()))
                 .append(",\"inicio\":").append(Json.str(inicio.toString()))
                 .append(",\"hora\":").append(Json.str(instante(t).withNano(0).toString()))
                 .append(",\"horasTranscurridas\":").append(Json.num(t / 3600.0))
+                .append(",\"segundosReales\":").append(Json.num(nsReales / 1e9))
+                .append(",\"duracionHoras\":").append(Double.isInfinite(duracionSeg) ? "null" : Json.num(duracionSeg / 3600.0))
+                .append(",\"dia\":").append((int) Math.floor(t / 86400.0) + 1)
                 .append(",\"factor\":").append(Json.num(factor))
+                .append(",\"scMin\":").append(Json.num(cicloSeg / 60.0))
+                .append(",\"saSeg\":").append(Json.num(cicloSeg / factor))
                 .append(",\"ciclos\":").append(ciclos)
                 .append(",\"msUltimoPlan\":").append(msUltimoPlan)
+                .append(",\"msMaximoPlan\":").append(msMaximoPlan)
                 .append(",\"iteraciones\":").append(iteraciones)
                 .append(",\"sinPlanificar\":").append(sinPlanificar)
                 .append(",\"motivoFin\":").append(Json.str(motivoFin))
                 .append(",\"tc\":").append(tcHoras < 0 ? "null" : Json.num(tcHoras))
+                .append(",\"lineasConError\":").append(fuente.lineasConError() + mantenimiento.errores())
                 .append(",\"error\":").append(Json.str(ultimoError));
 
-        // indicadores con semáforo
-        int enUso = 0;
-        for (Unidad u : unidades) if (!u.paradas.isEmpty() || u.ocupacion.equals("ENTREGANDO")) enUso++;
-        double pctPlazo = completados == 0 ? 100.0 : 100.0 * enPlazo / completados;
-        double pctFlota = 100.0 * enUso / unidades.size();
-        int minStock = Integer.MAX_VALUE;
-        for (Almacen a : almacenes) if (!a.infinito()) minStock = Math.min(minStock, a.stock);
+        // ---- resumen de indicadores (con su nivel de semáforo)
+        int enRuta = 0, disponibles = 0, enMant = 0;
+        for (Unidad u : unidades) {
+            String e = estadoUnidad(u);
+            if (e.equals("MANTENIMIENTO")) enMant++;
+            else if (e.equals("DISPONIBLE")) disponibles++;
+            else enRuta++;
+        }
         int pendientes = 0;
         for (Pedido p : pedidos.values()) if (!p.completo()) pendientes++;
-        b.append(",\"indicadores\":[");
-        indicador(b, "Entregas en plazo", String.format("%.1f %%", pctPlazo), semaforo.mayorEsMejor("plazo", pctPlazo, 95, 85), true);
-        indicador(b, "Pedidos vencidos", String.valueOf(vencidos), semaforo.menorEsMejor("vencidos", vencidos, 0, 3), false);
-        indicador(b, "Flota en uso", String.format("%.0f %% (%d de %d)", pctFlota, enUso, unidades.size()), semaforo.menorEsMejor("flota", pctFlota, 70, 90), false);
-        indicador(b, "Stock mínimo en intermedios", String.valueOf(minStock), semaforo.mayorEsMejor("stock", minStock, 300, 100), false);
-        indicador(b, "Pedidos recibidos", String.valueOf(recibidos), Indicadores.Nivel.NEUTRO, false);
-        indicador(b, "Pedidos completados", String.valueOf(completados), Indicadores.Nivel.NEUTRO, false);
-        indicador(b, "Pedidos pendientes", String.valueOf(pendientes), Indicadores.Nivel.NEUTRO, false);
-        indicador(b, "Costo acumulado", String.format("S/ %,.0f (%,.0f km)", costo, kmTotal), Indicadores.Nivel.NEUTRO, false);
-        b.append(']');
+        double pct = pctATiempo();
+        b.append(",\"resumen\":{")
+                .append("\"recibidos\":").append(recibidos)
+                .append(",\"entregados\":").append(completados)
+                .append(",\"aTiempo\":").append(enPlazo)
+                .append(",\"pctATiempo\":").append(Json.num(pct))
+                .append(",\"nivelATiempo\":").append(Json.str(semaforo.mayorEsMejor("plazo", pct, 95, 85).name()))
+                .append(",\"vencidos\":").append(vencidos)
+                .append(",\"vencidosSinEntregar\":").append(vencidosSinEntregar())
+                .append(",\"pendientes\":").append(pendientes)
+                .append(",\"unidadesEnRuta\":").append(enRuta)
+                .append(",\"unidadesDisponibles\":").append(disponibles)
+                .append(",\"unidadesMantenimiento\":").append(enMant)
+                .append(",\"flota\":").append(unidades.size())
+                .append(",\"km\":").append(Json.num(Math.round(kmTotal)))
+                .append(",\"costo\":").append(Json.num(Math.round(costo)))
+                .append('}');
+
+        // ---- quién atiende cada pedido y qué unidades van a recargar a cada almacén
+        Map<String, Set<String>> atendidoPor = new HashMap<>();
+        Map<String, Set<String>> vanARecargar = new HashMap<>();
+        for (Unidad u : unidades) {
+            for (Parada p : u.paradas) {
+                if (p.tipo() == Parada.Tipo.ENTREGA) atendidoPor.computeIfAbsent(p.pedidoId(), k -> new LinkedHashSet<>()).add(u.id);
+                if (p.tipo() == Parada.Tipo.RECARGA) vanARecargar.computeIfAbsent(p.almacenId(), k -> new LinkedHashSet<>()).add(u.id);
+            }
+        }
 
         b.append(",\"almacenes\":[");
         for (int i = 0; i < almacenes.size(); i++) {
             Almacen a = almacenes.get(i);
             if (i > 0) b.append(',');
-            b.append("{\"id\":").append(Json.str(a.id)).append(",\"x\":").append(a.nodo.x()).append(",\"y\":").append(a.nodo.y())
-                    .append(",\"stock\":").append(a.infinito() ? "null" : String.valueOf(a.stock)).append('}');
+            b.append("{\"id\":").append(Json.str(a.id)).append(",\"nombre\":").append(Json.str(nombreAlmacen(a.id)))
+                    .append(",\"x\":").append(a.nodo.x()).append(",\"y\":").append(a.nodo.y())
+                    .append(",\"central\":").append(a.infinito());
+            if (!a.infinito()) {
+                double consumo = 100.0 * (a.capacidad - a.stock) / a.capacidad;
+                b.append(",\"stock\":").append(a.stock).append(",\"capacidad\":").append(a.capacidad)
+                        .append(",\"consumoPct\":").append(Json.num(consumo))
+                        .append(",\"nivel\":").append(Json.str(semaforo.menorEsMejor("almacen", consumo, 70, 90).name()));
+            }
+            b.append(",\"recargan\":");
+            lista(b, vanARecargar.getOrDefault(a.id, Set.of()));
+            b.append('}');
         }
         b.append(']');
 
@@ -577,11 +745,12 @@ public final class Simulacion implements Runnable {
         for (int i = 0; i < unidades.size(); i++) {
             Unidad u = unidades.get(i);
             if (i > 0) b.append(',');
-            String est = !u.ocupacion.isEmpty() ? u.ocupacion : u.paradas.isEmpty() ? "DISPONIBLE" : "EN_RUTA";
+            double ocup = 100.0 * u.carga / u.tipo.capacidad;
             b.append("{\"id\":").append(Json.str(u.id)).append(",\"tipo\":").append(Json.str(u.tipo.name()))
                     .append(",\"x\":").append(Json.num(u.x())).append(",\"y\":").append(Json.num(u.y()))
                     .append(",\"carga\":").append(u.carga).append(",\"capacidad\":").append(u.tipo.capacidad)
-                    .append(",\"estado\":").append(Json.str(est)).append(",\"km\":").append(Json.num(Math.round(u.km)))
+                    .append(",\"nivel\":").append(Json.str(semaforo.menorEsMejor("carga", ocup, 70, 90).name()))
+                    .append(",\"estado\":").append(Json.str(estadoUnidad(u))).append(",\"km\":").append(Json.num(Math.round(u.km)))
                     .append(",\"camino\":[");
             boolean primero = true;
             for (Nodo n : u.camino) {
@@ -609,39 +778,55 @@ public final class Simulacion implements Runnable {
             if (p.completo()) continue;
             if (n++ > 0) b.append(',');
             double frac = (p.limite() - t) / (p.plazoHoras * 3600.0);
-            b.append("{\"id\":").append(Json.str(p.id)).append(",\"x\":").append(p.nodo.x()).append(",\"y\":").append(p.nodo.y())
+            b.append("{\"id\":").append(Json.str(p.id)).append(",\"cliente\":").append(Json.str(p.cliente))
+                    .append(",\"x\":").append(p.nodo.x()).append(",\"y\":").append(p.nodo.y())
                     .append(",\"cantidad\":").append(p.cantidad).append(",\"entregado\":").append(p.entregado)
+                    .append(",\"asignado\":").append(p.asignado)
                     .append(",\"plazo\":").append(p.plazoHoras)
+                    .append(",\"registro\":").append(Json.str(instante(p.registro).withNano(0).toString()))
                     .append(",\"limite\":").append(Json.str(instante(p.limite()).withNano(0).toString()))
-                    .append(",\"nivel\":").append(Json.str(p.vencido ? "ROJO" : semaforo.pedido(frac).name())).append('}');
+                    .append(",\"holgura\":").append(Json.num(Math.max(-1, Math.min(1, frac))))
+                    .append(",\"vencido\":").append(p.vencido)
+                    .append(",\"nivel\":").append(Json.str(p.vencido ? "ROJO" : semaforo.pedido(frac).name()))
+                    .append(",\"unidades\":");
+            lista(b, atendidoPor.getOrDefault(p.id, Set.of()));
+            b.append('}');
             if (n >= 3000) break;
         }
         b.append(']');
 
         b.append(",\"bloqueos\":[");
-        Set<Nodo> vistos = new LinkedHashSet<>();
-        for (Bloqueo bl : bloqueosActivos) vistos.addAll(bl.nodos());
-        boolean primero = true;
-        for (Nodo v : vistos) {
-            if (!primero) b.append(',');
-            b.append(v.x()).append(',').append(v.y());
-            primero = false;
+        for (int i = 0; i < bloqueosActivos.size(); i++) {
+            Bloqueo bl = bloqueosActivos.get(i);
+            if (i > 0) b.append(',');
+            b.append("{\"inicio\":").append(Json.str(bl.inicio().toString()))
+                    .append(",\"fin\":").append(Json.str(bl.fin().toString())).append(",\"vertices\":[");
+            for (int k = 0; k < bl.vertices().size(); k++) {
+                Nodo v = bl.vertices().get(k);
+                if (k > 0) b.append(',');
+                b.append('[').append(v.x()).append(',').append(v.y()).append(']');
+            }
+            b.append("]}");
         }
         b.append("]}");
         return b.toString();
     }
 
-    private static void indicador(StringBuilder b, String nombre, String valor, Indicadores.Nivel nivel, boolean primero) {
-        if (!primero) b.append(',');
-        b.append("{\"nombre\":").append(Json.str(nombre)).append(",\"valor\":").append(Json.str(valor))
-                .append(",\"nivel\":").append(Json.str(nivel.name())).append('}');
+    private static void lista(StringBuilder b, Iterable<String> valores) {
+        b.append('[');
+        boolean primero = true;
+        for (String v : valores) {
+            if (!primero) b.append(',');
+            b.append(Json.str(v));
+            primero = false;
+        }
+        b.append(']');
     }
 
     /** Resumen de una línea para pruebas en consola. */
     public synchronized String resumen() {
-        double pct = completados == 0 ? 100.0 : 100.0 * enPlazo / completados;
-        return String.format("t=%6.1f h | recibidos=%d completados=%d en plazo=%.1f%% vencidos=%d pendientes=%d | ciclos=%d Ta max=%d ms sinPlanificar=%d | S/ %,.0f | %s",
-                t / 3600, recibidos, completados, pct, vencidos, pedidos.size(), ciclos, msMaximoPlan, sinPlanificar, costo,
+        return String.format("t=%6.1f h | recibidos=%d completados=%d a tiempo=%.1f%% vencidos=%d (sin entregar %d) pendientes=%d | ciclos=%d Ta max=%d ms sinPlanificar=%d | S/ %,.0f | %s",
+                t / 3600, recibidos, completados, pctATiempo(), vencidos, vencidosSinEntregar(), pedidos.size(), ciclos, msMaximoPlan, sinPlanificar, costo,
                 estado == Estado.TERMINADA ? motivoFin : estado.name());
     }
 }
