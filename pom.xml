@@ -5,7 +5,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>pe.pucp.paqrap</groupId>
   <artifactId>rutapaq-minimo</artifactId>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <packaging>jar</packaging>
   <name>RUTAPAQ - servidor, simulación y visualizador con rutapaq-planner (ALNS y GA)</name>
 

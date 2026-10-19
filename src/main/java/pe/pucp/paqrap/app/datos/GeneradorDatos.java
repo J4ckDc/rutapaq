@@ -36,7 +36,7 @@ public final class GeneradorDatos {
                 for (int m : minutos) {
                     int x = r.nextInt(71), y = r.nextInt(51);
                     int cantidad = 1 + (int) Math.min(23, Math.abs(r.nextGaussian() * 4 + 3));
-                    w.write(String.format("%02dD%02dH%03d:%d,%d,c-%05d,%d,%d%n", d, m / 60, m % 60, x, y,
+                    w.write(String.format("%02dd%02dh%02dm:%d,%d,c-%05d,%d,%d%n", d, m / 60, m % 60, x, y,
                             1 + r.nextInt(500), cantidad, plazo(r)));
                 }
             }
@@ -61,7 +61,7 @@ public final class GeneradorDatos {
                         pts.append(',').append(x).append(',').append(y);
                         horizontal = !horizontal;
                     }
-                    w.write(String.format("%02dD%02dH%03d-%02dD%02dH%03d:%s%n", d, ini[0] / 60, ini[0] % 60,
+                    w.write(String.format("%02dd%02dh%02dm-%02dd%02dh%02dm:%s%n", d, ini[0] / 60, ini[0] % 60,
                             d, fin / 60, fin % 60, pts));
                 }
             }

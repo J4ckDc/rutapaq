@@ -1,80 +1,210 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="es" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>RUTAPAQ – Visualizador</title>
+  <title>RUTAPAQ – Simulador de rutas</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2322d3ee'/%3E%3Cpath d='M7 11h11v9H7zM18 14h4l3 3v3h-7z' fill='%230a1424'/%3E%3Ccircle cx='11' cy='22' r='2' fill='%230a1424'/%3E%3Ccircle cx='21' cy='22' r='2' fill='%230a1424'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="estilos.css">
 </head>
 <body>
-<aside id="panel">
-  <header>
-    <h1>RUTAPAQ</h1>
-    <span id="conexion" class="punto" title="Conexión con el servidor"></span>
+<div class="app" id="app">
+
+  <!-- ============================== menú lateral -->
+  <aside class="menu" id="menu">
+    <div class="marca">
+      <span class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M3 7h11v9H3zM14 10h4l3 3v3h-7z"/><circle cx="7" cy="18" r="1.8"/><circle cx="17" cy="18" r="1.8"/></svg>
+      </span>
+      <span class="marca-texto"><b>RUTAPAQ</b><small>Gestión de entregas</small></span>
+    </div>
+    <nav aria-label="Secciones">
+      <button class="nav-item" disabled title="Disponible en una próxima versión">
+        <svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></svg>
+        <span>Dashboard</span>
+      </button>
+      <button class="nav-item" disabled title="Disponible en una próxima versión">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M5.2 18.8l2.1-2.1M16.7 7.3l2.1-2.1"/></svg>
+        <span>Tiempo real</span>
+      </button>
+      <button class="nav-item activo" aria-current="page">
+        <svg viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>
+        <span>Simulador de rutas</span>
+      </button>
+      <button class="nav-item" disabled title="Disponible en una próxima versión">
+        <svg viewBox="0 0 24 24"><path d="M3 7h11v9H3zM14 10h4l3 3v3h-7z"/><circle cx="7" cy="18" r="1.8"/><circle cx="17" cy="18" r="1.8"/></svg>
+        <span>Flota</span>
+      </button>
+      <button class="nav-item" disabled title="Disponible en una próxima versión">
+        <svg viewBox="0 0 24 24"><path d="M4 10l8-6 8 6v10H4z"/><path d="M10 20v-6h4v6"/></svg>
+        <span>Almacenes</span>
+      </button>
+    </nav>
+    <div class="menu-pie">
+      <button class="icono-btn" id="plegarMenu" aria-label="Plegar menú" title="Plegar menú">
+        <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
+      </button>
+      <span class="version">v0.2 · 5 días</span>
+    </div>
+  </aside>
+
+  <!-- ============================== barra superior -->
+  <header class="barra">
+    <div class="grupo-control">
+      <label class="campo-fecha" title="Fecha y hora de inicio de la simulación">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
+        <input id="fecha" type="datetime-local" step="60" aria-label="Fecha y hora de inicio">
+      </label>
+      <div class="segmentado" role="group" aria-label="Modo de simulación">
+        <button class="seg activo" id="modo5d" aria-pressed="true">5 Días</button>
+        <button class="seg" id="modoColapso" disabled title="La simulación hasta el colapso llega en la siguiente versión">Colapso</button>
+      </div>
+      <div class="controles">
+        <button class="btn primario" id="btnIniciar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z"/></svg><span>Iniciar</span>
+        </button>
+        <button class="btn" id="btnDetener" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="6" width="3.5" height="12" rx="1"/><rect x="13.5" y="6" width="3.5" height="12" rx="1"/></svg><span>Detener</span>
+        </button>
+        <button class="btn" id="btnReanudar" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z"/></svg><span>Reanudar</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="tiempos" aria-live="off">
+      <div class="reloj" id="reloj">--/--/---- --:--:--</div>
+      <div class="sub-reloj"><span id="tReal">Real 00:00:00</span><span id="tHoy"></span></div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi"><b id="kEntregados" class="cian">0</b><span>Pedidos entregados</span></div>
+      <div class="kpi"><b id="kATiempo">—</b><span>A tiempo</span></div>
+    </div>
+
+    <div class="derecha">
+      <span class="estado" id="estado"><i></i><span>Sin simulación</span></span>
+      <button class="icono-btn" id="tema" aria-label="Cambiar a tema claro" title="Tema claro u oscuro">
+        <svg viewBox="0 0 24 24" class="sol"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></svg>
+        <svg viewBox="0 0 24 24" class="luna"><path d="M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z"/></svg>
+      </button>
+    </div>
   </header>
 
-  <section>
-    <h2>Escenario</h2>
-    <div class="fila">
-      <select id="escenario">
-        <option value="SEMANAL">Simulación de 5 días</option>
-        <option value="COLAPSO">Simulación hasta el colapso</option>
-        <option value="DIA_A_DIA">Operación día a día</option>
-      </select>
-      <input id="fecha" type="date">
+  <!-- ============================== escenario: mapa y paneles -->
+  <main class="escena" id="escena">
+    <canvas id="mapa" aria-label="Mapa de la ciudad con almacenes, unidades, pedidos y bloqueos"></canvas>
+    <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+
+    <div class="aviso-vacio" id="avisoVacio">
+      <b>Simulación de 5 días</b>
+      <span>Elige la fecha y hora de inicio arriba y presiona <em>Iniciar</em>.</span>
     </div>
-    <div class="fila">
-      <button id="iniciar">Iniciar</button>
-      <button id="detener" class="secundario">Detener</button>
+
+    <!-- panel izquierdo: indicadores -->
+    <section class="panel izq" id="panelIzq" aria-label="Indicadores">
+      <button class="plegar" data-panel="panelIzq" aria-label="Ocultar indicadores" title="Ocultar panel">
+        <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
+      </button>
+      <div class="bloque">
+        <h3>Inventario de almacenes</h3>
+        <ul class="almacenes" id="listaAlmacenes"></ul>
+        <div class="leyenda-mini"><span class="nota">Consumido</span><span><i class="p VERDE"></i>&lt;70%</span><span><i class="p AMBAR"></i>70–90%</span><span><i class="p ROJO"></i>&gt;90%</span></div>
+      </div>
+      <div class="bloque">
+        <h3>Línea de tiempo · 5 días</h3>
+        <div class="linea-tiempo" id="lineaTiempo">
+          <div class="pista"><div class="avance" id="ltAvance"></div><div class="punto" id="ltPunto"></div></div>
+          <div class="dias"><span>D1</span><span>D2</span><span>D3</span><span>D4</span><span>D5</span></div>
+        </div>
+      </div>
+      <div class="bloque fichas">
+        <div class="ficha cian-borde"><b id="fEnRuta">0</b><span>Vehículos en ruta</span></div>
+        <div class="ficha naranja-borde"><b id="fPendientes">0</b><span>Pedidos pendientes</span></div>
+      </div>
+      <div class="bloque datos">
+        <div><span>Vencidos</span><b id="dVencidos">0</b></div>
+        <div><span>Flota disponible</span><b id="dFlota">0 / 37</b></div>
+        <div><span>En mantenimiento</span><b id="dMant">0</b></div>
+        <div><span>Recorrido</span><b id="dKm">0 km</b></div>
+        <div><span>Costo</span><b id="dCosto">S/ 0</b></div>
+      </div>
+      <details class="bloque leyenda" open>
+        <summary><h3>Leyenda del mapa</h3></summary>
+        <ul class="ley">
+          <li><span class="sim cian"><svg class="ico-u" viewBox="-10 -8 20 14"><path d="M-8.5 2.5v-4l3-1 2.2-3.5h7l2.8 3.5 2 1v4z" fill="currentColor" stroke="none"/><circle cx="-4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/><circle cx="4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/></svg><svg class="ico-u" viewBox="-10 -8 20 14"><circle cx="-5.5" cy="3" r="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="5.5" cy="3" r="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M-6.5 .5l2-2.7 4-.6 2-1.4h2.5L6-.8 4 1.6h-6z" fill="currentColor" stroke="none"/><path d="M4.6-1l.9 4M3-4.2l.8-2.4H6" fill="none" stroke="currentColor" stroke-width="1.5"/></svg><svg class="ico-u" viewBox="-10 -8 20 14"><circle cx="-5" cy="2.5" r="3.2" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="5" cy="2.5" r="3.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M-5 2.5l4-5h5l1 5M-1-2.5l1.5 5h-5.5M-2.5-5H0M4-2.5l-.5-3.5" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></span><span>Auto, moto y bicicleta</span></li>
+          <li><span class="sim violeta"><svg class="ico-u" viewBox="-10 -8 20 14"><path d="M-8.5 2.5v-4l3-1 2.2-3.5h7l2.8 3.5 2 1v4z" fill="currentColor" stroke="none"/><circle cx="-4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/><circle cx="4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/></svg></span><span>En refrigerio (1 h)</span></li>
+          <li><span class="sim gris"><svg class="ico-u" viewBox="-10 -8 20 14"><path d="M-8.5 2.5v-4l3-1 2.2-3.5h7l2.8 3.5 2 1v4z" fill="currentColor" stroke="none"/><circle cx="-4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/><circle cx="4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/></svg></span><span>En mantenimiento (todo el día)</span></li>
+          <li><span class="sim cian anillo"><svg class="ico-u" viewBox="-10 -8 20 14"><path d="M-8.5 2.5v-4l3-1 2.2-3.5h7l2.8 3.5 2 1v4z" fill="currentColor" stroke="none"/><circle cx="-4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/><circle cx="4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/></svg></span><span>Entregando al cliente (1 h)</span></li>
+          <li><span class="sim cian anillo-grueso"><svg class="ico-u" viewBox="-10 -8 20 14"><path d="M-8.5 2.5v-4l3-1 2.2-3.5h7l2.8 3.5 2 1v4z" fill="currentColor" stroke="none"/><circle cx="-4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/><circle cx="4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/></svg></span><span>Unidad elegida o que atiende lo elegido</span></li>
+          <li><span class="sim"><i class="insignia">5</i></span><span>Varias unidades juntas</span></li>
+          <li><span class="sim"><i class="linea-ruta"></i></span><span>Camino hacia su próxima parada</span></li>
+          <li><span class="sim"><i class="parada">1</i><i class="parada naranja">R</i><i class="parada violeta">C</i></span><span>Paradas: entregas en orden, recarga, refrigerio</span></li>
+          <li><span class="sim naranja"><svg viewBox="0 0 24 24" class="ico-casa"><circle cx="12" cy="12" r="10" fill="var(--fondo)" stroke="currentColor" stroke-width="2.4"/><path d="M12 6.5l6 5.2h-1.6V17H7.6v-5.3H6z" fill="currentColor" stroke="none"/></svg></span><span>Almacén central (stock ilimitado)</span></li>
+          <li><span class="sim"><span class="t-VERDE"><svg viewBox="0 0 24 24" class="ico-casa"><circle cx="12" cy="12" r="10" fill="var(--fondo)" stroke="currentColor" stroke-width="2.4"/><path d="M12 6.5l6 5.2h-1.6V17H7.6v-5.3H6z" fill="currentColor" stroke="none"/></svg></span><span class="t-AMBAR"><svg viewBox="0 0 24 24" class="ico-casa"><circle cx="12" cy="12" r="10" fill="var(--fondo)" stroke="currentColor" stroke-width="2.4"/><path d="M12 6.5l6 5.2h-1.6V17H7.6v-5.3H6z" fill="currentColor" stroke="none"/></svg></span><span class="t-ROJO"><svg viewBox="0 0 24 24" class="ico-casa"><circle cx="12" cy="12" r="10" fill="var(--fondo)" stroke="currentColor" stroke-width="2.4"/><path d="M12 6.5l6 5.2h-1.6V17H7.6v-5.3H6z" fill="currentColor" stroke="none"/></svg></span></span><span>Almacén intermedio, según stock consumido</span></li>
+          <li><span class="sim"><i class="p VERDE"></i><i class="p AMBAR"></i><i class="p ROJO"></i></span><span>Pedido, según plazo transcurrido</span></li>
+          <li><span class="sim"><i class="p ROJO vencido"></i></span><span>Pedido vencido</span></li>
+          <li><span class="sim"><i class="linea-bloqueo"></i></span><span>Calle bloqueada</span></li>
+        </ul>
+      </details>
+    </section>
+    <button class="reabrir izq" data-panel="panelIzq" hidden aria-label="Mostrar indicadores">Indicadores</button>
+
+    <!-- panel derecho: rastreo de entregas -->
+    <section class="panel der" id="panelDer" aria-label="Rastreo de entregas">
+      <button class="plegar" data-panel="panelDer" aria-label="Ocultar rastreo" title="Ocultar panel">
+        <svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+      <h2>Rastreo de entregas</h2>
+      <div class="buscador">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
+        <input id="buscar" type="search" placeholder="Buscar pedido, cliente o unidad (TA03)" aria-label="Buscar pedido, cliente o unidad">
+        <button class="limpiar" id="limpiarBuscar" hidden aria-label="Quitar el filtro" title="Quitar el filtro">×</button>
+      </div>
+      <div class="leyenda-mini leyenda-pedidos"><span class="nota">Plazo transcurrido</span><span><i class="p VERDE"></i>&lt;50%</span><span><i class="p AMBAR"></i>50–80%</span><span><i class="p ROJO"></i>&gt;80% o vencido</span></div>
+      <div class="cabecera-lista"><span id="etiquetaLista">En curso</span><b id="cuentaPedidos">0 pedidos</b></div>
+      <ul class="pedidos" id="listaPedidos"></ul>
+    </section>
+    <button class="reabrir der" data-panel="panelDer" hidden aria-label="Mostrar rastreo">Rastreo</button>
+
+    <!-- detalle del elemento seleccionado -->
+    <section class="detalle" id="detalle" hidden aria-live="polite">
+      <button class="cerrar" id="cerrarDetalle" aria-label="Cerrar detalle">×</button>
+      <div id="detalleCuerpo"></div>
+    </section>
+
+    <div class="zoom">
+      <button class="icono-btn" id="zoomMas" aria-label="Acercar">+</button>
+      <button class="icono-btn" id="zoomMenos" aria-label="Alejar">−</button>
+      <button class="icono-btn" id="zoomReset" aria-label="Ver toda la ciudad" title="Ver toda la ciudad">
+        <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+      </button>
     </div>
-    <p id="mensaje" class="nota"></p>
-  </section>
 
-  <section>
-    <h2>Reloj</h2>
-    <div id="reloj">—</div>
-    <div id="detalleReloj" class="nota"></div>
-  </section>
+    <div class="avisos" id="avisos" aria-live="polite"></div>
+  </main>
+</div>
 
-  <section>
-    <h2>Indicadores</h2>
-    <ul id="indicadores"></ul>
-  </section>
+<!-- resumen al terminar los 5 días -->
+<dialog class="modal" id="modalFin" aria-labelledby="finTitulo">
+  <h2 id="finTitulo">Simulación de 5 días terminada</h2>
+  <p id="finPeriodo" class="nota"></p>
+  <div class="fin-grid" id="finGrid"></div>
+  <div class="modal-acciones">
+    <button class="btn" id="finCerrar">Ver el mapa</button>
+    <button class="btn primario" id="finNueva">Nueva simulación</button>
+  </div>
+</dialog>
 
-  <section>
-    <h2>Selección</h2>
-    <div id="seleccion" class="nota">Haga clic en una unidad o un pedido del mapa.</div>
-  </section>
-
-  <section id="registro">
-    <h2>Registrar pedido</h2>
-    <div class="fila">
-      <label>x <input id="px" type="number" min="0" max="70" value="10"></label>
-      <label>y <input id="py" type="number" min="0" max="50" value="10"></label>
-    </div>
-    <div class="fila">
-      <label>Cantidad <input id="pcant" type="number" min="1" value="5"></label>
-      <label>Plazo
-        <select id="pplazo"><option>4</option><option>8</option><option>12</option><option>18</option><option selected>36</option></select> h
-      </label>
-    </div>
-    <button id="registrar">Registrar</button>
-  </section>
-
-  <section class="leyenda">
-    <span><i class="g auto"></i>Auto</span>
-    <span><i class="g moto"></i>Moto</span>
-    <span><i class="g bici"></i>Bicicleta</span>
-    <span><i class="g alm"></i>Almacén</span>
-    <span><i class="g bloq"></i>Bloqueo</span>
-    <span><i class="c VERDE"></i><i class="c AMBAR"></i><i class="c ROJO"></i>Pedido según plazo</span>
-    <p class="nota">Rueda: acercar · Arrastrar: desplazar · Doble clic: vista completa</p>
-  </section>
-</aside>
-
-<main>
-  <canvas id="mapa"></canvas>
-</main>
+<!-- confirmación para reemplazar una simulación en curso -->
+<dialog class="modal" id="modalConfirmar" aria-labelledby="confTitulo">
+  <h2 id="confTitulo">¿Iniciar una nueva simulación?</h2>
+  <p>La simulación actual se descarta y no se podrá reanudar.</p>
+  <div class="modal-acciones">
+    <button class="btn" id="confNo">Cancelar</button>
+    <button class="btn primario" id="confSi">Iniciar nueva</button>
+  </div>
+</dialog>
 
 <script src="app.js"></script>
 </body>

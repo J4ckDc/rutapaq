@@ -18,6 +18,7 @@ public final class Unidad {
     public String ocupacion = "";
     public LocalDateTime turnoConRefrigerio;               // inicio del turno en que ya tomó refrigerio
     public double km;
+    public boolean enMantenimiento;                        // v02: día de mantenimiento preventivo
 
     public Unidad(String id, TipoUnidad tipo, Nodo inicio) {
         this.id = id;

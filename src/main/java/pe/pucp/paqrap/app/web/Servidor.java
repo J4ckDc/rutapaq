@@ -28,8 +28,9 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Servidor HTTP del JDK (sin dependencias).
- *   POST /api/simulacion?escenario=SEMANAL|COLAPSO|DIA_A_DIA&fecha=aaaa-mm-dd   inicia
- *   POST /api/simulacion/detener                                               detiene
+ *   POST /api/simulacion?escenario=SEMANAL|COLAPSO|DIA_A_DIA&fecha=aaaa-mm-ddThh:mm   inicia (reemplaza la anterior)
+ *   POST /api/simulacion/detener                                               detiene (v02: pausa, se puede reanudar)
+ *   POST /api/simulacion/reanudar                                              reanuda (v02)
  *   GET  /api/estado                                                           estado completo (JSON)
  *   GET  /api/stream                                                           estado cada N ms (SSE)
  *   POST /api/pedidos?x=&y=&cantidad=&plazo=&cliente=                          registro en línea
@@ -57,6 +58,7 @@ public final class Servidor {
         HttpServer s = HttpServer.create(new InetSocketAddress(host, puerto), 0);
         s.createContext("/api/simulacion", this::simulacion);
         s.createContext("/api/simulacion/detener", this::detener);
+        s.createContext("/api/simulacion/reanudar", this::reanudar);
         s.createContext("/api/estado", ex -> responder(ex, 200, "application/json", estadoJson()));
         s.createContext("/api/stream", this::stream);
         s.createContext("/api/pedidos", this::pedido);
@@ -133,14 +135,16 @@ public final class Servidor {
             if (esc == Simulacion.Escenario.DIA_A_DIA && (f == null || f.isBlank())) {
                 inicio = LocalDateTime.now().truncatedTo(ChronoUnit.MINUTES);
             } else {
-                inicio = LocalDate.parse(f == null || f.isBlank() ? cfg.texto("escenario.fechaInicio", "2026-01-01") : f).atStartOfDay();
+                // v02: acepta fecha y hora (aaaa-mm-ddThh:mm) o solo fecha (empieza a las 00:00)
+                String v = f == null || f.isBlank() ? cfg.texto("escenario.fechaInicio", "2026-01-01") : f.trim();
+                inicio = v.contains("T") ? LocalDateTime.parse(v).truncatedTo(ChronoUnit.MINUTES) : LocalDate.parse(v).atStartOfDay();
             }
         } catch (RuntimeException e) {
-            responder(ex, 400, "application/json", "{\"error\":\"fecha inválida (aaaa-mm-dd)\"}");
+            responder(ex, 400, "application/json", "{\"error\":\"fecha inválida (aaaa-mm-dd o aaaa-mm-ddThh:mm)\"}");
             return;
         }
         synchronized (this) {
-            if (sim != null) sim.detener();
+            if (sim != null) sim.cancelar();
             if (hilo != null) {
                 try {
                     hilo.join(2000);
@@ -156,9 +160,23 @@ public final class Servidor {
         responder(ex, 200, "application/json", "{\"ok\":true}");
     }
 
+    /** v02: Detener deja la simulación en pausa (antes la terminaba sin posibilidad de continuar). */
     private void detener(HttpExchange ex) throws IOException {
         Simulacion s = sim;
-        if (s != null) s.detener();
+        if (s == null || !s.pausar()) {
+            responder(ex, 409, "application/json", "{\"error\":\"no hay una simulación en ejecución\"}");
+            return;
+        }
+        responder(ex, 200, "application/json", "{\"ok\":true}");
+    }
+
+    /** v02: continúa una simulación detenida desde el mismo instante. */
+    private void reanudar(HttpExchange ex) throws IOException {
+        Simulacion s = sim;
+        if (s == null || !s.reanudar()) {
+            responder(ex, 409, "application/json", "{\"error\":\"no hay una simulación detenida\"}");
+            return;
+        }
         responder(ex, 200, "application/json", "{\"ok\":true}");
     }
 
@@ -189,6 +207,7 @@ public final class Servidor {
     private void config(HttpExchange ex) throws IOException {
         responder(ex, 200, "application/json", "{\"algoritmo\":" + Json.str(cfg.texto("planificador.algoritmo", "ALNS"))
                 + ",\"fechaInicio\":" + Json.str(cfg.texto("escenario.fechaInicio", "2026-01-01"))
+                + ",\"horaInicio\":" + Json.str(cfg.texto("escenario.horaInicio", "00:00"))
                 + ",\"minutosSemanal\":" + Json.num(cfg.decimal("escenario.semanal.minutosReales", 30)) + "}");
     }
 
@@ -207,7 +226,7 @@ public final class Servidor {
                 return;
             }
             String tipo = ruta.endsWith(".html") ? "text/html" : ruta.endsWith(".js") ? "application/javascript"
-                    : ruta.endsWith(".css") ? "text/css" : "application/octet-stream";
+                    : ruta.endsWith(".css") ? "text/css" : ruta.endsWith(".svg") ? "image/svg+xml" : "application/octet-stream";
             responder(ex, 200, tipo, in.readAllBytes());
         }
     }

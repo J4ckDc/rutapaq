@@ -92,7 +92,7 @@ public final class GeneradorDatosSinteticos {
             int dia = (int) (r[0] / 1440) + 1;
             int hora = (int) (r[0] % 1440) / 60;
             int minuto = (int) (r[0] % 60);
-            lineas.add(String.format("%02dD%02dH%03d:%d,%d,c-%05d,%d,%d",
+            lineas.add(String.format("%02dd%02dh%02dm:%d,%d,c-%05d,%d,%d",
                     dia, hora, minuto, r[1], r[2], ++cliente, r[3], r[4]));
         }
         escribir(archivo, lineas);
@@ -130,7 +130,7 @@ public final class GeneradorDatosSinteticos {
                 }
                 puntos.append(p[0]).append(',').append(p[1]);
             }
-            lineas.add(String.format("%02dD%02dH%03d-%02dD%02dH%03d:%s",
+            lineas.add(String.format("%02dd%02dh%02dm-%02dd%02dh%02dm:%s",
                     (int) (inicio / 1440) + 1, (int) (inicio % 1440) / 60, (int) (inicio % 60),
                     (int) (fin / 1440) + 1, (int) (fin % 1440) / 60, (int) (fin % 60), puntos));
         }
