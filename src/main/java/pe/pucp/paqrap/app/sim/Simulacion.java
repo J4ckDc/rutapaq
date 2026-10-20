@@ -6,6 +6,7 @@ import pe.pucp.paqrap.app.datos.Formato;
 import pe.pucp.paqrap.app.datos.FuenteDatos;
 import pe.pucp.paqrap.app.datos.PlanMantenimiento;
 import pe.pucp.paqrap.app.modelo.Almacen;
+import pe.pucp.paqrap.app.modelo.Averia;
 import pe.pucp.paqrap.app.modelo.Nodo;
 import pe.pucp.paqrap.app.modelo.Parada;
 import pe.pucp.paqrap.app.modelo.Pedido;
@@ -54,6 +55,17 @@ import java.util.Set;
  *     durante ese día (00:00 a 23:59), queda en el almacén central fuera de servicio.
  *   - Si el planificador falla, las unidades conservan su itinerario anterior.
  *   - El % a tiempo cuenta también los pedidos vencidos que aún no se entregan.
+ *
+ * Cambios v03 (averías, P&R pregunta 3; reglas en ReglasAveria):
+ *   - Una avería se registra desde el visualizador (registrarAveria) o desde el archivo de averías programadas
+ *     (averias.aaaamm.txt, escenarios de 5 días y colapso). La unidad queda detenida en su posición exacta, sus
+ *     pedidos vuelven al planificador y se replanifica de inmediato con un ciclo extraordinario (RF07-01).
+ *   - Tipo 1: detenida 2 h con su carga; el planificador la sigue considerando desde que termina la avería.
+ *   - Tipos 2 y 3: no reciben rutas. Durante las 4 h que permanecen en el lugar, sus paquetes se pueden trasvasar
+ *     a otra unidad (30 min): el planificador las ve como un depósito temporal (TipoAlmacen.TRASVASE). Luego
+ *     pasan de forma instantánea al almacén central con lo no trasvasado y vuelven a operar al final del turno
+ *     siguiente (tipo 2) o tras al menos 2 días, en el turno de 15:00 (tipo 3).
+ *   - Las averías no bloquean la calle: las demás unidades siguen circulando por ahí (P&R pregunta 7).
  */
 public final class Simulacion implements Runnable {
 
@@ -65,6 +77,10 @@ public final class Simulacion implements Runnable {
     private static final long TICK_MS = 100;              // cada cuánto avanza el reloj real
     private static final double ENTREGA_SEG = 3600.0;     // acondicionamiento de la entrega
     private static final double REFRIGERIO_SEG = 3600.0;
+    /** v03: identificador del depósito temporal de una unidad averiada (p. ej. TRV-TA03). */
+    static final String TRASVASE = "TRV-";
+    /** v03: averías finalizadas que se envían al visualizador (las vigentes se envían siempre). */
+    private static final int HISTORIAL_VISIBLE = 60;
 
     private final Config cfg;
     private final Escenario escenario;
@@ -73,12 +89,15 @@ public final class Simulacion implements Runnable {
     private final Caminos caminos;
     private final List<Almacen> almacenes = new ArrayList<>();
     private final List<Unidad> unidades = new ArrayList<>();
+    private final Map<String, Unidad> unidadPorId = new HashMap<>();
     private final Map<String, Pedido> pedidos = new LinkedHashMap<>();
     private final List<Bloqueo> bloqueosActivos = new ArrayList<>();
     private final Planificador planificador;
     private final FuenteDatos fuente;
     private final PlanMantenimiento mantenimiento;
     private final Indicadores semaforo;
+    private final ReglasAveria reglas;
+    private final List<Averia> averias = new ArrayList<>();   // v03: historial del escenario (vigentes y finalizadas)
 
     private final double factor;          // segundos simulados por segundo real
     private final double cicloSeg;        // Sc
@@ -98,6 +117,7 @@ public final class Simulacion implements Runnable {
     private double tcHoras = -1;
 
     private int contador, recibidos, completados, enPlazo, vencidos, ciclos, sinPlanificar, iteraciones;
+    private int contadorAverias, averiasOmitidas, trasvasados, devueltos;   // v03
     private long msUltimoPlan, msMaximoPlan;
     private double costo, kmTotal;
     private String ultimoError = "";
@@ -108,7 +128,11 @@ public final class Simulacion implements Runnable {
         this.inicio = inicio;
         this.planificador = planificador;
         this.semaforo = new Indicadores(cfg);
-        this.fuente = new FuenteDatos(Path.of(cfg.texto("datos.carpeta", "datos")), inicio);
+        this.reglas = new ReglasAveria(cfg);
+        // v03: las averías programadas del archivo se usan en la simulación de 5 días y en la de colapso;
+        // en la operación día a día se registran desde el visualizador.
+        this.fuente = new FuenteDatos(Path.of(cfg.texto("datos.carpeta", "datos")), inicio,
+                reglas.archivoHabilitado && escenario != Escenario.DIA_A_DIA);
         this.mantenimiento = new PlanMantenimiento(Path.of(cfg.texto("datos.carpeta", "datos")));
         this.mapa = new MapaReticula(cfg.entero("ien.mapaAnchoKm", 70), cfg.entero("ien.mapaAltoKm", 50));
         this.caminos = new Caminos(mapa);
@@ -134,6 +158,7 @@ public final class Simulacion implements Runnable {
         agregarFlota(TipoUnidad.AUTO, cfg.entero("ien.autos", 10), central);
         agregarFlota(TipoUnidad.MOTO, cfg.entero("ien.motos", 15), central);
         agregarFlota(TipoUnidad.BICI, cfg.entero("ien.bicicletas", 12), central);
+        for (Unidad u : unidades) unidadPorId.put(u.id, u);
 
         this.proximaRecarga = inicio.toLocalDate().atTime(23, 59, 59);
         if (!proximaRecarga.isAfter(inicio)) proximaRecarga = proximaRecarga.plusDays(1);
@@ -281,7 +306,14 @@ public final class Simulacion implements Runnable {
             else if (!toca && u.enMantenimiento) u.enMantenimiento = false;   // vuelve disponible en el central
         }
 
-        // 4. ciclo de planificación
+        // 3c. averías (v03): traslados al almacén central y retornos de las vigentes; luego las programadas
+        revisarAverias();
+        for (Formato.LineaAveria a : fuente.averiasHasta(ahora)) {
+            if (a.instante().isBefore(inicio)) continue;
+            averiaProgramada(a);
+        }
+
+        // 4. ciclo de planificación (también el extraordinario que pide una avería)
         if (t >= proximoCiclo) {
             planificar();
             proximoCiclo = t + cicloSeg;
@@ -315,14 +347,13 @@ public final class Simulacion implements Runnable {
      * (ver planificar), así que normalmente la unidad está libre. Si aún tuviera paradas, según el curso
      * "debe retornar de inmediato": sus entregas pendientes vuelven a planificarse y la unidad pasa al
      * almacén central con su carga (traslado instantáneo, como en las averías tipo 2 y 3).
+     * v03: si tenía una avería tipo 2 o 3 y seguía en el lugar, pasa al almacén central con lo no trasvasado
+     * (la avería sigue vigente hasta su retorno); las unidades que iban a trasvasar sus paquetes se replanifican.
      */
     private void entrarMantenimiento(Unidad u) {
-        for (Parada p : u.paradas) {
-            if (p.tipo() == Parada.Tipo.ENTREGA) {
-                Pedido ped = pedidos.get(p.pedidoId());
-                if (ped != null) ped.asignado -= p.cantidad();
-            }
-        }
+        Averia av = u.averia;
+        if (av != null && av.seTraslada() && av.fase == Averia.Fase.EN_LUGAR) trasladarAlCentral(u);
+        for (Parada p : u.paradas) liberar(p);
         u.paradas.clear();
         u.camino.clear();
         u.progreso = 0;
@@ -347,6 +378,177 @@ public final class Simulacion implements Runnable {
         return "P" + contador;
     }
 
+    /** Devuelve al planificador el pedido de una entrega que sale de un itinerario. */
+    private void liberar(Parada p) {
+        if (p.tipo() != Parada.Tipo.ENTREGA) return;
+        Pedido ped = pedidos.get(p.pedidoId());
+        if (ped != null) ped.asignado -= p.cantidad();
+    }
+
+    // ------------------------------------------------------------------ averías (v03)
+
+    /**
+     * Registro desde el visualizador (RF05-04, RF05-05): la avería ocurre en el instante actual de la simulación,
+     * en cualquiera de los escenarios. Lanza IllegalArgumentException si la unidad o el tipo no son válidos e
+     * IllegalStateException si la unidad no puede averiarse ahora (ya averiada, en mantenimiento o simulación
+     * terminada). Si la simulación está detenida, la replanificación se hace en este mismo momento.
+     */
+    public synchronized Averia registrarAveria(String unidadId, int tipo) {
+        if (estado == Estado.TERMINADA) throw new IllegalStateException("La simulación ya terminó");
+        ReglasAveria.validarTipo(tipo);
+        Unidad u = unidadPorId.get(unidadId == null ? "" : unidadId.trim().toUpperCase());
+        if (u == null) throw new IllegalArgumentException("No existe la unidad " + unidadId);
+        String motivo = motivoNoAveriable(u);
+        if (motivo != null) throw new IllegalStateException(motivo);
+        Averia av = averiar(u, tipo, t, Averia.VISUALIZADOR);
+        if (estado == Estado.PAUSADA) {               // en pausa el reloj no avanza: se replanifica ya
+            planificar();
+            proximoCiclo = t + cicloSeg;
+        }
+        return av;
+    }
+
+    /** Por qué una unidad no puede averiarse ahora (null si puede). */
+    private String motivoNoAveriable(Unidad u) {
+        if (u.averia != null) {
+            return u.id + " ya está averiada (tipo " + u.averia.tipo + ") hasta el "
+                    + instante(u.averia.disponible).withNano(0).toString().replace('T', ' ');
+        }
+        if (u.enMantenimiento) return u.id + " está en mantenimiento preventivo";
+        return null;
+    }
+
+    /** Avería leída del archivo de averías programadas. Si la unidad no puede averiarse en ese instante, se omite. */
+    private void averiaProgramada(Formato.LineaAveria a) {
+        Unidad u = unidadPorId.get(a.unidad());
+        String motivo = u == null ? "la unidad " + a.unidad() + " no existe en la flota" : motivoNoAveriable(u);
+        if (motivo != null) {
+            averiasOmitidas++;
+            System.err.printf("Avería programada omitida (%s, %s, tipo %d): %s%n", a.instante(), a.unidad(), a.tipo(), motivo);
+            return;
+        }
+        averiar(u, a.tipo(), Math.max(0, Math.min(t, segundos(a.instante()))), Averia.ARCHIVO);
+    }
+
+    /**
+     * La unidad queda detenida en su posición (RF05-04): se liberan sus paradas para que sus pedidos se reasignen
+     * (RF07-01) y se pide un ciclo de planificación inmediato. Si iba a mitad de una cuadra, conserva solo esa
+     * cuadra: al terminar una avería tipo 1 la completa hasta la esquina y desde allí sigue con su nuevo plan.
+     */
+    private Averia averiar(Unidad u, int tipo, double cuando, String origen) {
+        double x = u.x(), y = u.y();
+        Set<String> afectados = new LinkedHashSet<>();
+        for (Parada p : u.paradas) {
+            if (p.tipo() == Parada.Tipo.ENTREGA) afectados.add(p.pedidoId());
+            liberar(p);
+        }
+        u.paradas.clear();
+        Nodo esquina = esquinaCercana(u);
+        detenerEnLaCuadra(u);
+
+        LocalDateTime ini = instante(cuando);
+        double finEnLugar = segundos(reglas.finEnLugar(tipo, ini));
+        double disponible = segundos(reglas.disponible(tipo, ini));
+        Averia av = new Averia("AV" + (++contadorAverias), u.id, u.tipo, tipo, origen, cuando, x, y, esquina,
+                finEnLugar, disponible, u.carga, new ArrayList<>(afectados));
+        u.averia = av;
+        u.ocupacion = "";
+        u.ocupadoHasta = Math.max(u.ocupadoHasta, disponible);       // no se mueve mientras dure la avería
+        averias.add(av);
+        proximoCiclo = Math.min(proximoCiclo, t);                     // replanificación inmediata
+        System.out.printf("[%s] Avería tipo %d (%s) en %s en (%.1f, %.1f) con %d paquetes; %d pedidos a replanificar; disponible %s%n",
+                ini.withNano(0), tipo, origen, u.id, x, y, u.carga, afectados.size(), instante(disponible).withNano(0));
+        return av;
+    }
+
+    /** Cambios de fase de las averías vigentes: traslado al almacén central (tipos 2 y 3) y retorno a la operación. */
+    private void revisarAverias() {
+        for (Unidad u : unidades) {
+            Averia av = u.averia;
+            if (av == null) continue;
+            if (av.seTraslada() && av.fase == Averia.Fase.EN_LUGAR && t >= av.finEnLugar) trasladarAlCentral(u);
+            if (t >= av.disponible) finalizarAveria(u);
+        }
+    }
+
+    /** Tipos 2 y 3: al cumplir las 4 h pasa de forma instantánea al almacén central con los paquetes no trasvasados. */
+    private void trasladarAlCentral(Unidad u) {
+        Averia av = u.averia;
+        av.devueltos += u.carga;
+        devueltos += u.carga;
+        u.carga = 0;
+        u.nodo = almacenes.get(0).nodo;
+        u.camino.clear();
+        u.progreso = 0;
+        u.ocupacion = "";
+        av.fase = Averia.Fase.EN_CENTRAL;
+        cancelarTrasvases(u.id);
+        System.out.printf("[%s] %s pasa al almacén central con %d paquetes no trasvasados (trasvasados: %d)%n",
+                instante(t).withNano(0), u.id, av.devueltos, av.trasvasados);
+    }
+
+    private void finalizarAveria(Unidad u) {
+        Averia av = u.averia;
+        if (av.seTraslada() && av.fase == Averia.Fase.EN_LUGAR) trasladarAlCentral(u);
+        av.fase = Averia.Fase.FINALIZADA;
+        av.fin = t;
+        u.averia = null;
+        // los tipos 2 y 3 vuelven en el almacén central y no estaban en el plan: se incorporan de inmediato
+        if (av.seTraslada()) proximoCiclo = Math.min(proximoCiclo, t);
+        System.out.printf("[%s] %s vuelve a operar (avería tipo %d)%n", instante(t).withNano(0), u.id, av.tipo);
+    }
+
+    /**
+     * Si la unidad averiada ya no está en el lugar, las unidades que iban a recoger sus paquetes sueltan ese
+     * trasvase y las entregas que dependían de él; vuelven a planificarse en el siguiente paso.
+     */
+    private void cancelarTrasvases(String averiada) {
+        String deposito = TRASVASE + averiada;
+        for (Unidad w : unidades) {
+            List<Parada> lista = new ArrayList<>(w.paradas);
+            int desde = -1;
+            for (int i = 0; i < lista.size() && desde < 0; i++) {
+                Parada p = lista.get(i);
+                if (p.tipo() == Parada.Tipo.RECARGA && deposito.equals(p.almacenId())) desde = i;
+            }
+            if (desde < 0) continue;
+            for (int i = desde; i < lista.size(); i++) liberar(lista.get(i));
+            w.paradas.clear();
+            w.paradas.addAll(lista.subList(0, desde));
+            if (desde == 0) detenerEnLaCuadra(w);
+            proximoCiclo = Math.min(proximoCiclo, t);
+        }
+    }
+
+    /** Esquina más cercana a la posición de la unidad (allí se hace el trasvase). */
+    private static Nodo esquinaCercana(Unidad u) {
+        Nodo sig = u.camino.peekFirst();
+        return sig != null && u.progreso >= 0.5 ? sig : u.nodo;
+    }
+
+    /** Deja a la unidad sin camino, salvo la cuadra que está recorriendo (si va a mitad de una). */
+    private static void detenerEnLaCuadra(Unidad u) {
+        if (u.camino.isEmpty()) return;
+        Nodo sig = u.camino.peekFirst();
+        u.camino.clear();
+        if (u.progreso > 0) u.camino.add(sig);
+    }
+
+    private static boolean esTrasvase(String almacenId) {
+        return almacenId != null && almacenId.startsWith(TRASVASE);
+    }
+
+    /** Paquetes que aún tiene la unidad averiada de un depósito de trasvase (0 si ya no está en el lugar). */
+    private int saldoTrasvase(String deposito) {
+        Unidad a = unidadPorId.get(deposito.substring(TRASVASE.length()));
+        return a == null || a.averia == null || a.averia.fase != Averia.Fase.EN_LUGAR ? 0 : a.carga;
+    }
+
+    private boolean esAlmacen(Nodo n) {
+        for (Almacen a : almacenes) if (a.nodo.equals(n)) return true;
+        return false;
+    }
+
     // ------------------------------------------------------------------ planificación (rutapaq-planner)
 
     private void planificar() {
@@ -362,12 +564,14 @@ public final class Simulacion implements Runnable {
         // b) estado de la flota tal como lo espera el planificador
         //    v02: no reciben rutas las unidades en mantenimiento ni las que entran a mantenimiento antes
         //    de que termine el horizonte de ruta (así ninguna ruta cruza las 00:00 de su mantenimiento).
+        //    v03: tampoco las averiadas tipo 2 y 3; la de tipo 1 sí, disponible al terminar sus 2 h y con su carga.
         Map<String, Integer> reservado = new HashMap<>();
         List<Vehiculo> flota = new ArrayList<>();
         LocalDateTime finHorizonte = instante(t + horizonteRutaSeg);
         for (Unidad u : unidades) {
             Vehiculo v = vehiculo(u, reservado);   // siempre: reserva el stock de sus recargas conservadas
-            boolean disponible = !u.enMantenimiento && !mantenimiento.empiezaEntre(u.id, instante(t), finHorizonte);
+            boolean disponible = !u.enMantenimiento && !mantenimiento.empiezaEntre(u.id, instante(t), finHorizonte)
+                    && (u.averia == null || !u.averia.seTraslada());
             if (disponible) flota.add(v);
         }
 
@@ -379,6 +583,22 @@ public final class Simulacion implements Runnable {
                     a.nodo.x(), a.nodo.y(), a.infinito() ? 0 : a.capacidad);
             if (!a.infinito()) x.retirar(Math.min(a.capacidad, a.capacidad - a.stock + reservado.getOrDefault(a.id, 0)));
             alm.add(x);
+        }
+        // c2) v03: unidades con avería tipo 2 o 3 que siguen en el lugar: sus paquetes se pueden trasvasar mientras
+        //     la recogida termine antes de que las lleven al almacén central (depósito temporal del planificador).
+        if (reglas.trasvaseHabilitado) {
+            for (Unidad u : unidades) {
+                Averia av = u.averia;
+                if (av == null || !av.seTraslada() || av.fase != Averia.Fase.EN_LUGAR || esAlmacen(av.nodo)) continue;
+                String id = TRASVASE + u.id;
+                int saldo = u.carga - reservado.getOrDefault(id, 0);
+                if (saldo <= 0 || t + reglas.segundosTrasvase() > av.finEnLugar) continue;
+                pe.pucp.paqrap.planner.model.Almacen x = new pe.pucp.paqrap.planner.model.Almacen(id,
+                        TipoAlmacen.TRASVASE, caminos.indice(av.nodo), av.nodo.x(), av.nodo.y(), saldo);
+                x.setDisponibleHasta(instante(av.finEnLugar));
+                x.setSegundosAtencion(Math.round(reglas.segundosTrasvase()));
+                alm.add(x);
+            }
         }
 
         // d) cartera: todo lo que falta asignar, fraccionado como en el IEN (entregas parciales)
@@ -420,10 +640,8 @@ public final class Simulacion implements Runnable {
         }
 
         // f) el plan pasa a ser el itinerario de cada unidad
-        Map<String, Unidad> porId = new HashMap<>();
-        for (Unidad u : unidades) porId.put(u.id, u);
         for (Ruta r : plan.getRutas()) {
-            Unidad u = porId.get(r.getVehiculo().getId());
+            Unidad u = unidadPorId.get(r.getVehiculo().getId());
             if (u == null) continue;
             boolean refrigerio = false;
             Nodo ultimo = u.nodo;
@@ -433,7 +651,7 @@ public final class Simulacion implements Runnable {
                     // El evaluador cuenta el refrigerio antes de la siguiente llegada:
                     // aquí se toma al llegar al nodo de esa parada, antes de atenderla.
                     case REFRIGERIO -> refrigerio = true;
-                    case RECARGA -> {
+                    case RECARGA -> {                        // v03: también un trasvase (TRV-TTNN)
                         if (refrigerio) u.paradas.addLast(Parada.refrigerio(n));
                         u.paradas.addLast(Parada.recarga(n, pr.referencia(), pr.cantidad()));
                         refrigerio = false;
@@ -472,10 +690,13 @@ public final class Simulacion implements Runnable {
         }
     }
 
-    /** Conserva la parada hacia la que la unidad ya se mueve (y su refrigerio previo); libera el resto. */
+    /**
+     * Conserva la parada hacia la que la unidad ya se mueve (y su refrigerio previo); libera el resto.
+     * v03: una unidad averiada no se está moviendo, así que no conserva ninguna.
+     */
     private void recortar(Unidad u) {
         List<Parada> conservar = new ArrayList<>();
-        boolean enMovimiento = !u.camino.isEmpty();
+        boolean enMovimiento = !u.camino.isEmpty() && u.averia == null;
         boolean cerrado = !enMovimiento;
         for (Parada p : u.paradas) {
             if (!cerrado) {
@@ -483,13 +704,16 @@ public final class Simulacion implements Runnable {
                 if (p.tipo() != Parada.Tipo.REFRIGERIO) cerrado = true;
                 continue;
             }
-            if (p.tipo() == Parada.Tipo.ENTREGA) {
-                Pedido ped = pedidos.get(p.pedidoId());
-                if (ped != null) ped.asignado -= p.cantidad();
-            }
+            liberar(p);
         }
         u.paradas.clear();
         u.paradas.addAll(conservar);
+    }
+
+    /** km entre dos nodos respetando bloqueos (Manhattan si no hay camino). */
+    private double km(Nodo a, Nodo b) {
+        int d = caminos.distancia(a, b);
+        return d < 0 ? a.manhattan(b) : d;
     }
 
     /** Dónde, cuándo y con cuánta carga queda libre la unidad tras sus paradas conservadas. */
@@ -501,10 +725,12 @@ public final class Simulacion implements Runnable {
         boolean primero = true;
         for (Parada p : u.paradas) {
             double km;
-            if (primero && !u.camino.isEmpty()) km = u.camino.size() - u.progreso;
-            else {
-                int d = caminos.distancia(n, p.nodo());
-                km = d < 0 ? n.manhattan(p.nodo()) : d;
+            if (primero && !u.camino.isEmpty()) {
+                km = u.camino.size() - u.progreso;
+                Nodo fin = u.camino.peekLast();
+                if (!fin.equals(p.nodo())) km += km(fin, p.nodo());   // v03: termina la cuadra y sigue a la parada
+            } else {
+                km = km(n, p.nodo());
             }
             primero = false;
             tl += u.tipo.segundos(km);
@@ -515,14 +741,28 @@ public final class Simulacion implements Runnable {
                     carga = Math.max(0, carga - p.cantidad());
                 }
                 case RECARGA -> {
-                    reservado.merge(p.almacenId(), u.tipo.capacidad - carga, Integer::sum);
-                    carga = u.tipo.capacidad;
+                    if (esTrasvase(p.almacenId())) {
+                        // v03: recoge lo que aún no reservaron otras unidades; el trasvase toma 30 min
+                        int libre = Math.max(0, saldoTrasvase(p.almacenId()) - reservado.getOrDefault(p.almacenId(), 0));
+                        int q = Math.min(u.tipo.capacidad - carga, libre);
+                        reservado.merge(p.almacenId(), q, Integer::sum);
+                        carga += q;
+                        tl += reglas.segundosTrasvase();
+                    } else {
+                        reservado.merge(p.almacenId(), u.tipo.capacidad - carga, Integer::sum);
+                        carga = u.tipo.capacidad;
+                    }
                 }
                 case REFRIGERIO -> {
                     turnoRefrigerio = TurnoConductor.vigenteEn(instante(tl)).getInicio();
                     tl += REFRIGERIO_SEG;
                 }
             }
+        }
+        if (u.paradas.isEmpty() && !u.camino.isEmpty()) {
+            // v03: unidad detenida a mitad de cuadra (avería tipo 1 o trasvase cancelado): queda libre en la esquina
+            tl += u.tipo.segundos(u.camino.size() - u.progreso);
+            n = u.camino.peekLast();
         }
         Vehiculo v = new Vehiculo(u.id, TipoVehiculo.valueOf(u.tipo.name()), caminos.indice(n), instante(tl));
         v.setCarga(carga);
@@ -535,16 +775,17 @@ public final class Simulacion implements Runnable {
     // ------------------------------------------------------------------ ejecución del itinerario
 
     private void mover(Unidad u, double desde, double hasta) {
+        if (u.averia != null && u.averia.seTraslada()) return;  // v03: tipos 2 y 3 no se mueven por sí mismas
         double tl = desde;
         int guardia = 0;
         while (tl < hasta && guardia++ < 10_000) {
-            if (u.ocupadoHasta > tl) {
+            if (u.ocupadoHasta > tl) {                            // entrega, refrigerio, trasvase o avería tipo 1
                 tl = Math.min(hasta, u.ocupadoHasta);
                 continue;
             }
             u.ocupacion = "";
             Parada p = u.paradas.peekFirst();
-            if (p == null) return;                               // sin trabajo
+            if (p == null && u.camino.isEmpty()) return;          // sin trabajo
 
             if (u.camino.isEmpty()) {
                 if (u.nodo.equals(p.nodo())) {
@@ -558,8 +799,9 @@ public final class Simulacion implements Runnable {
                 u.progreso = 0;
             }
 
+            // v03: sin paradas (p == null) la unidad solo termina la cuadra en la que se detuvo
             Nodo sig = u.camino.peekFirst();
-            if (u.progreso == 0 && !sig.equals(p.nodo()) && caminos.bloqueado(sig)) {
+            if (p != null && u.progreso == 0 && !sig.equals(p.nodo()) && caminos.bloqueado(sig)) {
                 u.camino.clear();                                // apareció un bloqueo: recalcular
                 List<Nodo> c = caminos.camino(u.nodo, p.nodo());
                 if (c == null) return;
@@ -610,6 +852,10 @@ public final class Simulacion implements Runnable {
                 }
             }
             case RECARGA -> {
+                if (esTrasvase(p.almacenId())) {
+                    trasvasar(u, p, tl);
+                    return;
+                }
                 for (Almacen a : almacenes) {
                     if (!a.id.equals(p.almacenId())) continue;
                     int q = Math.min(u.tipo.capacidad - u.carga, a.stock);
@@ -623,6 +869,28 @@ public final class Simulacion implements Runnable {
                 u.turnoConRefrigerio = TurnoConductor.vigenteEn(instante(tl)).getInicio();
             }
         }
+    }
+
+    /**
+     * v03: trasvase. La unidad receptora recoge de la averiada los paquetes que le caben y queda ocupada el tiempo
+     * del trasvase (30 min). Si la averiada ya no está en el lugar o le quedan menos paquetes de los previstos, se
+     * pide una replanificación: las entregas que no se puedan cubrir vuelven al planificador.
+     */
+    private void trasvasar(Unidad receptora, Parada p, double tl) {
+        Unidad averiada = unidadPorId.get(p.almacenId().substring(TRASVASE.length()));
+        Averia av = averiada == null ? null : averiada.averia;
+        int q = av == null || av.fase != Averia.Fase.EN_LUGAR ? 0
+                : Math.min(receptora.tipo.capacidad - receptora.carga, averiada.carga);
+        if (q < p.cantidad()) proximoCiclo = Math.min(proximoCiclo, t);
+        if (q <= 0) return;
+        averiada.carga -= q;
+        receptora.carga += q;
+        av.trasvasados += q;
+        av.receptoras.add(receptora.id);
+        trasvasados += q;
+        receptora.ocupadoHasta = tl + reglas.segundosTrasvase();
+        receptora.ocupacion = "TRASVASE";
+        System.out.printf("[%s] Trasvase: %s recoge %d paquetes de %s%n", instante(tl).withNano(0), receptora.id, q, averiada.id);
     }
 
     // ------------------------------------------------------------------ lectura del estado
@@ -645,9 +913,33 @@ public final class Simulacion implements Runnable {
     }
 
     private String estadoUnidad(Unidad u) {
+        if (u.averia != null) return "AVERIADA";                 // v03
         if (u.enMantenimiento) return "MANTENIMIENTO";
-        if (!u.ocupacion.isEmpty()) return u.ocupacion;          // ENTREGANDO o REFRIGERIO
+        if (!u.ocupacion.isEmpty()) return u.ocupacion;          // ENTREGANDO, REFRIGERIO o TRASVASE (v03)
         return u.paradas.isEmpty() ? "DISPONIBLE" : "EN_RUTA";
+    }
+
+    /** v03: hasta cuándo una unidad no está disponible (avería o mantenimiento); null si está operativa. */
+    private LocalDateTime noDisponibleHasta(Unidad u) {
+        LocalDateTime hasta = null;
+        if (u.enMantenimiento) {
+            LocalDate dia = instante(t).toLocalDate().plusDays(1);
+            for (int i = 0; i < 31 && mantenimiento.enMantenimiento(u.id, dia); i++) dia = dia.plusDays(1);
+            hasta = dia.atStartOfDay();
+        }
+        if (u.averia != null) {
+            LocalDateTime fin = instante(u.averia.disponible);
+            if (hasta == null || fin.isAfter(hasta)) hasta = fin;
+        }
+        return hasta;
+    }
+
+    private String hora(double seg) {
+        return Json.str(instante(seg).withNano(0).toString());
+    }
+
+    private static String hora(LocalDateTime x) {
+        return Json.str(x.withNano(0).toString());
     }
 
     private static String nombreAlmacen(String id) {
@@ -685,10 +977,14 @@ public final class Simulacion implements Runnable {
                 .append(",\"error\":").append(Json.str(ultimoError));
 
         // ---- resumen de indicadores (con su nivel de semáforo)
-        int enRuta = 0, disponibles = 0, enMant = 0;
+        int enRuta = 0, disponibles = 0, enMant = 0, averiadas = 0;
+        int[] porTipo = new int[4];
         for (Unidad u : unidades) {
             String e = estadoUnidad(u);
-            if (e.equals("MANTENIMIENTO")) enMant++;
+            if (e.equals("AVERIADA")) {
+                averiadas++;
+                porTipo[u.averia.tipo]++;
+            } else if (e.equals("MANTENIMIENTO")) enMant++;
             else if (e.equals("DISPONIBLE")) disponibles++;
             else enRuta++;
         }
@@ -707,6 +1003,14 @@ public final class Simulacion implements Runnable {
                 .append(",\"unidadesEnRuta\":").append(enRuta)
                 .append(",\"unidadesDisponibles\":").append(disponibles)
                 .append(",\"unidadesMantenimiento\":").append(enMant)
+                .append(",\"unidadesAveriadas\":").append(averiadas)
+                .append(",\"averiadasTipo1\":").append(porTipo[1])
+                .append(",\"averiadasTipo2\":").append(porTipo[2])
+                .append(",\"averiadasTipo3\":").append(porTipo[3])
+                .append(",\"averias\":").append(averias.size())
+                .append(",\"averiasOmitidas\":").append(averiasOmitidas)
+                .append(",\"trasvasados\":").append(trasvasados)
+                .append(",\"devueltos\":").append(devueltos)
                 .append(",\"flota\":").append(unidades.size())
                 .append(",\"km\":").append(Json.num(Math.round(kmTotal)))
                 .append(",\"costo\":").append(Json.num(Math.round(costo)))
@@ -750,10 +1054,20 @@ public final class Simulacion implements Runnable {
                     .append(",\"x\":").append(Json.num(u.x())).append(",\"y\":").append(Json.num(u.y()))
                     .append(",\"carga\":").append(u.carga).append(",\"capacidad\":").append(u.tipo.capacidad)
                     .append(",\"nivel\":").append(Json.str(semaforo.menorEsMejor("carga", ocup, 70, 90).name()))
-                    .append(",\"estado\":").append(Json.str(estadoUnidad(u))).append(",\"km\":").append(Json.num(Math.round(u.km)))
-                    .append(",\"camino\":[");
+                    .append(",\"estado\":").append(Json.str(estadoUnidad(u))).append(",\"km\":").append(Json.num(Math.round(u.km)));
+            // v03: avería vigente y hasta cuándo no está disponible (avería o mantenimiento)
+            Averia av = u.averia;
+            if (av == null) b.append(",\"averia\":null");
+            else b.append(",\"averia\":{\"id\":").append(Json.str(av.id)).append(",\"tipo\":").append(av.tipo)
+                    .append(",\"fase\":").append(Json.str(av.fase.name()))
+                    .append(",\"inicio\":").append(hora(av.inicio))
+                    .append(",\"finLugar\":").append(hora(av.finEnLugar))
+                    .append(",\"disponible\":").append(hora(av.disponible)).append('}');
+            LocalDateTime hasta = noDisponibleHasta(u);
+            b.append(",\"noDisponibleHasta\":").append(hasta == null ? "null" : hora(hasta));
+            b.append(",\"camino\":[");
             boolean primero = true;
-            for (Nodo n : u.camino) {
+            for (Nodo n : av != null ? List.<Nodo>of() : u.camino) {   // una unidad averiada no dibuja camino
                 if (!primero) b.append(',');
                 b.append('[').append(n.x()).append(',').append(n.y()).append(']');
                 primero = false;
@@ -795,6 +1109,26 @@ public final class Simulacion implements Runnable {
         }
         b.append(']');
 
+        // ---- v03: averías del escenario (las vigentes y las últimas finalizadas) y qué pasaría si ocurre una ahora
+        b.append(",\"averias\":[");
+        int finalizadas = 0;
+        boolean primeraAveria = true;
+        for (int i = averias.size() - 1; i >= 0; i--) {
+            Averia av = averias.get(i);
+            if (!av.activa() && ++finalizadas > HISTORIAL_VISIBLE) continue;
+            if (!primeraAveria) b.append(',');
+            averiaJson(b, av, vanARecargar.getOrDefault(TRASVASE + av.unidad, Set.of()));
+            primeraAveria = false;
+        }
+        LocalDateTime ahora = instante(t);
+        b.append("],\"reglasAveria\":{\"trasvase\":").append(reglas.trasvaseHabilitado)
+                .append(",\"trasvaseMinutos\":").append(Json.num(reglas.minutosTrasvase))
+                .append(",\"horasEnLugar\":").append(Json.num(reglas.horasEnLugar))
+                .append(",\"disponibleTipo1\":").append(hora(reglas.disponible(1, ahora)))
+                .append(",\"disponibleTipo2\":").append(hora(reglas.disponible(2, ahora)))
+                .append(",\"disponibleTipo3\":").append(hora(reglas.disponible(3, ahora)))
+                .append(",\"trasladoTipo23\":").append(hora(reglas.finEnLugar(2, ahora))).append('}');
+
         b.append(",\"bloqueos\":[");
         for (int i = 0; i < bloqueosActivos.size(); i++) {
             Bloqueo bl = bloqueosActivos.get(i);
@@ -812,6 +1146,72 @@ public final class Simulacion implements Runnable {
         return b.toString();
     }
 
+    /** v03: una avería en JSON (estado, historial y respuesta del registro). */
+    private void averiaJson(StringBuilder b, Averia av, Set<String> vanATrasvasar) {
+        Unidad u = unidadPorId.get(av.unidad);
+        b.append("{\"id\":").append(Json.str(av.id))
+                .append(",\"unidad\":").append(Json.str(av.unidad))
+                .append(",\"tipoUnidad\":").append(Json.str(av.tipoUnidad.name()))
+                .append(",\"tipo\":").append(av.tipo)
+                .append(",\"nombreTipo\":").append(Json.str(Averia.nombreTipo(av.tipo)))
+                .append(",\"origen\":").append(Json.str(av.origen))
+                .append(",\"fase\":").append(Json.str(av.fase.name()))
+                .append(",\"inicio\":").append(hora(av.inicio))
+                .append(",\"finLugar\":").append(hora(av.finEnLugar))
+                .append(",\"disponible\":").append(hora(av.disponible))
+                .append(",\"fin\":").append(av.fin < 0 ? "null" : hora(av.fin))
+                .append(",\"x\":").append(Json.num(av.x)).append(",\"y\":").append(Json.num(av.y))
+                .append(",\"nodo\":[").append(av.nodo.x()).append(',').append(av.nodo.y()).append(']')
+                .append(",\"carga\":").append(av.carga)
+                .append(",\"cargaActual\":").append(av.fase == Averia.Fase.EN_LUGAR && u != null ? u.carga : 0)
+                .append(",\"trasvasable\":").append(reglas.trasvaseHabilitado && av.seTraslada()
+                        && av.fase == Averia.Fase.EN_LUGAR && !esAlmacen(av.nodo))
+                .append(",\"trasvasados\":").append(av.trasvasados)
+                .append(",\"devueltos\":").append(av.devueltos)
+                .append(",\"pedidos\":");
+        lista(b, av.pedidos);
+        b.append(",\"receptoras\":");
+        lista(b, av.receptoras);
+        b.append(",\"vanATrasvasar\":");
+        lista(b, vanATrasvasar);
+        b.append('}');
+    }
+
+    /** v03: la avería registrada, en JSON (respuesta de POST /api/averias). */
+    public synchronized String averiaJson(Averia av) {
+        StringBuilder b = new StringBuilder(512);
+        averiaJson(b, av, Set.of());
+        return b.toString();
+    }
+
+    /** v03: historial completo de averías del escenario, de la más antigua a la más reciente (GET /api/averias). */
+    public synchronized String averiasJson() {
+        StringBuilder b = new StringBuilder(256 + 512 * averias.size()).append('[');
+        for (int i = 0; i < averias.size(); i++) {
+            if (i > 0) b.append(',');
+            averiaJson(b, averias.get(i), Set.of());
+        }
+        return b.append(']').toString();
+    }
+
+    // ---- v03: acceso para las pruebas del paquete
+
+    synchronized Unidad unidad(String id) {
+        return unidadPorId.get(id);
+    }
+
+    synchronized List<Averia> averias() {
+        return List.copyOf(averias);
+    }
+
+    synchronized Pedido pedido(String id) {
+        return pedidos.get(id);
+    }
+
+    synchronized LocalDateTime ahora() {
+        return instante(t);
+    }
+
     private static void lista(StringBuilder b, Iterable<String> valores) {
         b.append('[');
         boolean primero = true;
@@ -825,8 +1225,10 @@ public final class Simulacion implements Runnable {
 
     /** Resumen de una línea para pruebas en consola. */
     public synchronized String resumen() {
-        return String.format("t=%6.1f h | recibidos=%d completados=%d a tiempo=%.1f%% vencidos=%d (sin entregar %d) pendientes=%d | ciclos=%d Ta max=%d ms sinPlanificar=%d | S/ %,.0f | %s",
+        int vigentes = 0;
+        for (Unidad u : unidades) if (u.averia != null) vigentes++;
+        return String.format("t=%6.1f h | recibidos=%d completados=%d a tiempo=%.1f%% vencidos=%d (sin entregar %d) pendientes=%d | ciclos=%d Ta max=%d ms sinPlanificar=%d | S/ %,.0f | averías=%d (vigentes %d, trasvasados %d, devueltos %d) | %s",
                 t / 3600, recibidos, completados, pctATiempo(), vencidos, vencidosSinEntregar(), pedidos.size(), ciclos, msMaximoPlan, sinPlanificar, costo,
-                estado == Estado.TERMINADA ? motivoFin : estado.name());
+                averias.size(), vigentes, trasvasados, devueltos, estado == Estado.TERMINADA ? motivoFin : estado.name());
     }
 }
