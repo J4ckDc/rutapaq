@@ -1,11 +1,32 @@
-# RUTAPAQ v02 — servidor, simulación y visualizador con rutapaq-planner (ALNS y GA)
+# RUTAPAQ v03: servidor, simulación y visualizador con rutapaq-planner (ALNS y GA)
 
 Un solo proceso Java 17 **sin dependencias en ejecución**. Contiene el código de
 **rutapaq-planner v2.0** (`pe.pucp.paqrap.planner`: ALNS_PAQRAP, HGS_PAQRAP, EvaluadorItinerario y
 el banco del IEN) y, alrededor de él, la simulación y el visualizador web (`pe.pucp.paqrap.app`).
 
-Alcance de la v02: el escenario **simulación de 5 días** funciona completo con los datos del profesor.
-La operación día a día y la simulación hasta el colapso quedan para la siguiente versión.
+Alcance de la v03: sobre la **simulación de 5 días** de la v02 se agregan las **averías** de las unidades
+(tipos 1, 2 y 3), con registro desde el visualizador, averías programadas por archivo, trasvase de paquetes,
+traslado al almacén central y replanificación inmediata. El servidor ya aplica las averías en los tres
+escenarios; la operación día a día y la simulación hasta el colapso siguen pendientes en la interfaz.
+
+## Cambios de la v03 respecto de la v02: averías
+
+| # | Cambio | Dónde |
+|---|---|---|
+| 1 | Registro de averías desde el visualizador: botón **Registrar avería** en el detalle de la unidad y en la pestaña **Averías** del panel derecho. Se elige la unidad y el tipo (1, 2 o 3) y se confirma en un diálogo que muestra cuándo volvería a estar disponible. La avería ocurre en el instante simulado actual. | `resources/web/`, `POST /api/averias` |
+| 2 | Al ocurrir, la unidad queda **detenida en su posición exacta** (la calle no se bloquea), sus pedidos vuelven al planificador y se ejecuta un **ciclo de planificación extraordinario** en ese momento (también si la simulación está detenida). | `Simulacion.averiar()` |
+| 3 | Reglas de la P&R (pregunta 3): tipo 1 no disponible 2 h en el lugar y con su carga; tipos 2 y 3 permanecen 4 h en el lugar y luego pasan de forma instantánea al almacén central con los paquetes no trasvasados; el tipo 2 vuelve al final del turno siguiente y el tipo 3 tras al menos 2 días, al inicio del turno de 15:00. Todos los valores se configuran (`averia.*`). | `app/sim/ReglasAveria.java`, `app/modelo/Averia.java` |
+| 4 | **Trasvase** (tipos 2 y 3): mientras sigue en el lugar, la unidad averiada se entrega al planificador como un depósito temporal (`TipoAlmacen.TRASVASE`) con sus paquetes, una hora de cierre (cuando la llevan al central) y 30 min de atención. Otra unidad puede ir a recoger los paquetes si alcanza a terminar antes del cierre. Con los almacenes del caso el planificador da los mismos resultados que en la v02. | `planner/model/Almacen.java`, `planner/core/EvaluadorItinerario.recargar()`, `DatosPlanificacion` |
+| 5 | Averías programadas para los escenarios de 5 días y colapso: archivo mensual `datos/averias.aaaamm.txt` (formato definido por el equipo, ver abajo) y comando `generar-averias` para crear archivos de prueba. `datos/` trae archivos de prueba de ene-2026 a dic-2028 (2 averías por día). | `app/datos/Formato.java`, `FuenteDatos.java`, `GeneradorDatos.java` |
+| 6 | Mapa: la unidad averiada se dibuja detenida con un **distintivo rojo con el tipo** (1, 2 o 3) y un halo rojo mientras sigue en el lugar; las que ya están en el almacén central se dibujan junto a su ícono. Al pasar el mouse: tipo, hora de ocurrencia y tiempo de indisponibilidad. Las unidades que hacen un trasvase se ven con un anillo naranja y la parada **T** en su itinerario. | `resources/web/app.js` |
+| 7 | Panel derecho con pestañas **Pedidos** y **Averías**: lista de unidades averiadas por tipo (1, 2 y 3) con su fase, tiempo restante y paquetes por trasvasar, e historial de las averías terminadas (duración, pedidos replanificados, trasvasados y devueltos). Al elegir una, el mapa se centra en ella (del panel al mapa). | `resources/web/` |
+| 8 | Detalle de la unidad con la avería vigente (ocurrencia, lugar, fin en el lugar, disponibilidad, trasvases, pedidos replanificados) y el periodo de indisponibilidad también en mantenimiento. Avisos emergentes al ocurrir una avería, al trasvasar, al pasar al central y al volver a operar. Panel izquierdo con las averiadas por tipo y resumen final con averías, trasvasados y devueltos. | `resources/web/` |
+| 9 | El mantenimiento preventivo convive con las averías: si a las 00:00 empieza el mantenimiento de una unidad averiada que sigue en el lugar, pasa al central con lo no trasvasado y la avería sigue hasta su retorno. | `Simulacion.entrarMantenimiento()` |
+| 10 | 17 pruebas nuevas: reglas de cada tipo y límites de turno, formato del archivo, unidad detenida y replanificación, traslado al central y retorno, trasvase en el evaluador, en ALNS, en GA y en la simulación, cierre del trasvase y convivencia con el mantenimiento. | `src/test/java/.../app/sim/AveriasTest.java`, `planner/TrasvaseTest.java` |
+
+Verificación: las 32 pruebas pasan (las 15 del planificador sin cambios y las 17 nuevas). Sin averías, la v03 da los
+mismos resultados que la v02 con los mismos datos y semilla (5 días desde el 01/01/2026: 76 pedidos recibidos,
+74 entregados, S/ 10 184).
 
 ## Cambios de la v02 respecto de la v01
 
@@ -47,6 +68,12 @@ java -jar rutapaq.jar probar 2026-01-01 120            # 5 días
 java -jar rutapaq.jar probar 2027-03-01 240 COLAPSO    # hasta el colapso (o 240 h)
 ```
 
+Archivos de averías programadas de prueba (v03):
+
+```bash
+java -jar rutapaq.jar generar-averias datos 202601 202812 2 7   # meses, averías por día, semilla
+```
+
 El banco experimental del IEN sigue funcionando igual desde el mismo jar:
 
 ```bash
@@ -81,12 +108,47 @@ así ninguna ruta cruza las 00:00. Si aun así tuviera paradas a las 00:00, sus 
 planificarse y la unidad pasa al almacén central (traslado instantáneo, supuesto tomado de la regla de
 averías tipo 2 y 3). A las 00:00 del día siguiente vuelve a estar disponible en el central.
 
+## Averías (v03)
+
+Reglas según la P&R (pregunta 3) y la Lista de Exigencias v03 (RF05-04, RF05-05, RF05-09, RF07-01, RF08-04):
+
+| Tipo | En el lugar | Luego | Vuelve a estar disponible |
+|---|---|---|---|
+| 1 · menor | 2 h, con su carga | sigue operando desde allí | a las 2 h |
+| 2 · intermedia | 4 h (sus paquetes se pueden trasvasar) | pasa de forma instantánea al almacén central con lo no trasvasado | al final del turno siguiente al de la avería |
+| 3 · mayor | 4 h (sus paquetes se pueden trasvasar) | pasa de forma instantánea al almacén central con lo no trasvasado | tras al menos 2 días, al inicio del turno de 15:00 |
+
+Ejemplo: avería tipo 2 de TA03 el 12/01 a las 10:20 (turno de 07:00 a 15:00). TA03 se detiene donde está, sus
+pedidos se replanifican en ese momento y el plan puede enviar a otra unidad a recoger sus paquetes (30 min). A las
+14:20 pasa al almacén central con lo que no se trasvasó y vuelve a estar disponible a las 23:00, al terminar el
+turno de 15:00 a 23:00. Si fuera tipo 1 volvería a las 12:20 en el mismo lugar; si fuera tipo 3, el 14/01 a las 15:00.
+
+Decisiones del equipo donde la P&R aún no precisa:
+
+- El tiempo de trasvase (30 min) sale de la nota de la pregunta 3; el trasvase solo se ofrece en los tipos 2 y 3,
+  que son los que la respuesta menciona con "paquetes no trasvasados".
+- Tipo 3: "al menos 2 días y retorna en el turno de 15:00 a 23:00" se toma como el primer inicio de ese turno
+  cuando ya pasaron 48 h.
+- Una avería tipo 1 a mitad de una cuadra: al terminar, la unidad completa la cuadra hasta la esquina y sigue.
+- No se puede averiar una unidad que ya está averiada o en mantenimiento.
+
+Registro en línea (lo usa el visualizador): `POST /api/averias?unidad=TA03&tipo=2` responde la avería registrada o
+un error (400 datos inválidos, 409 unidad ya averiada, en mantenimiento o sin simulación en curso).
+`GET /api/averias` devuelve el historial de averías del escenario.
+
+Averías programadas (5 días y colapso), un archivo por mes en `datos/`: `averias.aaaamm.txt`, registro
+`##d##h##m:TTNN,tipo`, por ejemplo `05d10h20m:TA03,2`. El curso aún no publica el formato ni las reglas de
+generación ("se tendrán reglas de generación", P&R pregunta 3), así que este formato lo define el equipo y se lee
+en `Formato.averia()`; si el curso publica otro, solo cambia ese método. Un registro se omite (y se informa en
+consola) si la unidad no existe, ya está averiada o está en mantenimiento en ese instante. Para simular sin
+averías programadas: `averia.archivo.habilitado=false`.
+
 ## Configuración
 
 | Archivo | Qué contiene |
 |---|---|
 | `planner.properties` (de rutapaq-planner, sin cambios) | Mapa, almacenes, flota, Sc, Sa, P, parámetros de ALNS y GA |
-| `config.properties` | Servidor, algoritmo, escenarios (fecha y hora propuestas, duración del 5D), frecuencia de publicación y semáforo (`semaforo.plazo.*`, `semaforo.almacen.*`, `semaforo.carga.*`, `semaforo.pedido.*`) |
+| `config.properties` | Servidor, algoritmo, escenarios (fecha y hora propuestas, duración del 5D), averías (`averia.tipo1.horas`, `averia.enLugar.horas`, `averia.tipo3.diasMinimos`, `averia.tipo3.horaRetorno`, `averia.trasvase.*`, `averia.archivo.habilitado`), frecuencia de publicación y semáforo (`semaforo.plazo.*`, `semaforo.almacen.*`, `semaforo.carga.*`, `semaforo.pedido.*`) |
 
 Un `config.properties` junto al jar sobrescribe cualquier clave de los dos archivos, sin recompilar.
 
@@ -94,12 +156,13 @@ Un `config.properties` junto al jar sobrescribe cualquier clave de los dos archi
 
 | Paquete | Qué hace |
 |---|---|
-| `pe.pucp.paqrap.planner.*` | rutapaq-planner v2.0 (`model`, `core`, `alns`, `hgs`, `ien`); en la v02 solo cambió el formato que aceptan los lectores del IEN |
-| `app.sim.Simulacion` | Reloj, estado en memoria, ciclo de planificación con rutapaq-planner, ejecución, colapso |
+| `pe.pucp.paqrap.planner.*` | rutapaq-planner v2.0 (`model`, `core`, `alns`, `hgs`, `ien`); en la v02 solo cambió el formato que aceptan los lectores del IEN; en la v03 se agrega el depósito temporal de trasvase (`TipoAlmacen.TRASVASE`), sin efecto en el banco del IEN |
+| `app.sim.Simulacion` | Reloj, estado en memoria, ciclo de planificación con rutapaq-planner, ejecución, averías, colapso |
+| `app.sim.ReglasAveria`, `app.modelo.Averia` | v03: reglas de los 3 tipos de avería y registro de cada avería (fases, trasvases, devueltos) |
 | `app.sim.Caminos` | Caminos nodo a nodo sobre la `MapaReticula` del planner |
 | `app.sim.Planificadores` | Crea `ALNS_PAQRAP` o `HGS_PAQRAP` según la configuración |
 | `app.sim.Indicadores` | Semáforo con umbrales configurables |
-| `app.datos` | Lectura de ventas y bloqueos línea por línea, en el formato oficial, y plan de mantenimiento |
+| `app.datos` | Lectura de ventas, bloqueos y averías programadas línea por línea, y plan de mantenimiento |
 | `app.web.Servidor` | REST, SSE y archivos del visualizador |
 | `resources/web` | Visualizador (Canvas 2D + EventSource) |
 

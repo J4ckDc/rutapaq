@@ -11,6 +11,7 @@ import java.util.Map;
 
 import pe.pucp.paqrap.planner.model.Almacen;
 import pe.pucp.paqrap.planner.model.Pedido;
+import pe.pucp.paqrap.planner.model.TipoAlmacen;
 import pe.pucp.paqrap.planner.model.TurnoConductor;
 import pe.pucp.paqrap.planner.model.Vehiculo;
 
@@ -54,6 +55,10 @@ public final class DatosPlanificacion {
     public int[] nodoAlmacen;
     public boolean[] infinito;
     public int[] saldo;
+    /** v03: deposito temporal de una unidad averiada (trasvase), su cierre y su tiempo de atencion. */
+    public boolean[] trasvase;
+    public long[] cierre;
+    public long[] atencion;
 
     public Unidad[] unidades;
     public int K;
@@ -88,10 +93,18 @@ public final class DatosPlanificacion {
         d.nodoAlmacen = new int[d.nAlm];
         d.infinito = new boolean[d.nAlm];
         d.saldo = new int[d.nAlm];
+        d.trasvase = new boolean[d.nAlm];
+        d.cierre = new long[d.nAlm];
+        d.atencion = new long[d.nAlm];
         for (int a = 0; a < d.nAlm; a++) {
             d.nodoAlmacen[a] = registrar(d.almacenes[a].getNodo(), local, nodos);
             d.infinito[a] = d.almacenes[a].isInventarioInfinito();
             d.saldo[a] = d.infinito[a] ? Integer.MAX_VALUE : d.almacenes[a].getStock();
+            // v03: en los almacenes del caso no hay cierre ni tiempo de carga (igual que en la v02)
+            d.trasvase[a] = d.almacenes[a].getTipo() == TipoAlmacen.TRASVASE;
+            LocalDateTime hasta = d.almacenes[a].getDisponibleHasta();
+            d.cierre[a] = hasta == null ? Long.MAX_VALUE : d.seg(hasta);
+            d.atencion[a] = d.almacenes[a].getSegundosAtencion();
         }
 
         List<Pedido> pend = inst.getPendientes();

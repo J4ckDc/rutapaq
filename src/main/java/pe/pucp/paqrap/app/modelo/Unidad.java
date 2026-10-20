@@ -19,6 +19,7 @@ public final class Unidad {
     public LocalDateTime turnoConRefrigerio;               // inicio del turno en que ya tomó refrigerio
     public double km;
     public boolean enMantenimiento;                        // v02: día de mantenimiento preventivo
+    public Averia averia;                                  // v03: avería vigente (null si la unidad está operativa)
 
     public Unidad(String id, TipoUnidad tipo, Nodo inicio) {
         this.id = id;

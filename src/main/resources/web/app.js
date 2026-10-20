@@ -1,4 +1,4 @@
-// RUTAPAQ v02 – visualizador del Simulador de rutas (escenario de 5 días).
+// RUTAPAQ v03 – visualizador del Simulador de rutas (escenario de 5 días) con averías de las unidades.
 // Recibe el estado completo por SSE (/api/stream) cada ~500 ms y lo dibuja en un canvas.
 // Toda la lógica (simulación, planificación, semáforo) está en el servidor: aquí solo se dibuja.
 // Entre una foto y la siguiente, las unidades se interpolan siguiendo su camino por las calles,
@@ -41,7 +41,16 @@
     return (d ? `${d}d ` : '') + `${dos(h)}:${dos(m)}:${dos(s)}`;
   }
   const TIPOS = { AUTO: 'Auto', MOTO: 'Moto', BICI: 'Bicicleta' };
-  const ESTADOS_U = { EN_RUTA: 'En ruta', ENTREGANDO: 'Entregando', REFRIGERIO: 'Refrigerio', DISPONIBLE: 'Sin tareas', MANTENIMIENTO: 'En mantenimiento' };
+  const ESTADOS_U = { EN_RUTA: 'En ruta', ENTREGANDO: 'Entregando', REFRIGERIO: 'Refrigerio', DISPONIBLE: 'Sin tareas', MANTENIMIENTO: 'En mantenimiento',
+    AVERIADA: 'Averiada', TRASVASE: 'Trasvase' };
+  // v03: averías (P&R pregunta 3)
+  const NOMBRE_TIPO_AV = { 1: 'menor', 2: 'intermedia', 3: 'mayor' };
+  const FASES_AV = { EN_LUGAR: 'En el lugar', EN_CENTRAL: 'En el central', FINALIZADA: 'Finalizada' };
+  const esTrasvase = (ref) => typeof ref === 'string' && ref.startsWith('TRV-');
+  /** Unidad en camino hacia una averiada para el trasvase: su próxima parada es la recogida en ese punto. */
+  const vaATrasvasar = (u) => u.estado === 'EN_RUTA' && u.paradas.length > 0
+    && u.paradas[0].tipo === 'RECARGA' && esTrasvase(u.paradas[0].ref);
+  const pedidosReplanificados = (n) => n === 1 ? 'su pedido se replanifica' : `sus ${n} pedidos se replanifican`;
   const ESTADOS_SIM = { SIN_SIMULACION: 'Sin simulación', PREPARADA: 'Preparando', EJECUTANDO: 'Simulando', PAUSADA: 'Detenido', TERMINADA: 'Finalizado' };
 
   // ================================================================ tema claro / oscuro
@@ -209,7 +218,9 @@
   /** Unidades a resaltar según lo seleccionado. */
   function unidadesResaltadas() {
     if (!sel || !estado) return new Set();
-    if (sel.tipo === 'unidad') return new Set([sel.id]);
+    if (sel.tipo === 'unidad') {        // v03: con una averiada se resaltan también las que vienen a trasvasar
+      return new Set([sel.id, ...ayudantes(averiaDe(estado.unidades.find((x) => x.id === sel.id)))]);
+    }
     if (sel.tipo === 'pedido') { const p = estado.pedidos.find((x) => x.id === sel.id); return new Set(p ? p.unidades : []); }
     if (sel.tipo === 'almacen') { const a = estado.almacenes.find((x) => x.id === sel.id); return new Set(a ? a.recargan : []); }
     return new Set();
@@ -225,7 +236,7 @@
     if (sel.tipo === 'unidad') {
       const u = estado.unidades.find((x) => x.id === sel.id);
       if (!u) return null;
-      return { unidades: new Set([u.id]), pedidos: new Set(u.paradas.filter((p) => p.tipo === 'ENTREGA').map((p) => p.ref)) };
+      return { unidades: new Set([u.id, ...ayudantes(averiaDe(u))]), pedidos: new Set(u.paradas.filter((p) => p.tipo === 'ENTREGA').map((p) => p.ref)) };
     }
     if (sel.tipo === 'pedido') {
       const p = estado.pedidos.find((x) => x.id === sel.id);
@@ -267,8 +278,9 @@
       let n = 0;
       u.paradas.forEach((p) => {
         const [px, py] = aPantalla(p.x, p.y, g);
-        const etiqueta = p.tipo === 'RECARGA' ? 'R' : p.tipo === 'REFRIGERIO' ? 'C' : String(++n);
-        ctx.fillStyle = p.tipo === 'REFRIGERIO' ? col.violeta : p.tipo === 'RECARGA' ? col.naranja : col.cian;
+        const trv = p.tipo === 'RECARGA' && esTrasvase(p.ref);
+        const etiqueta = trv ? 'T' : p.tipo === 'RECARGA' ? 'R' : p.tipo === 'REFRIGERIO' ? 'C' : String(++n);
+        ctx.fillStyle = trv ? col.rojo : p.tipo === 'REFRIGERIO' ? col.violeta : p.tipo === 'RECARGA' ? col.naranja : col.cian;
         ctx.beginPath(); ctx.arc(px, py - 13, 8, 0, 7); ctx.fill();
         ctx.fillStyle = col.fondo; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center';
         ctx.fillText(etiqueta, px, py - 9.5);
@@ -345,23 +357,29 @@
     for (const u of estado.unidades) {
       if (enf && !enf.unidades.has(u.id)) continue;   // en enfoque solo se ven las unidades elegidas
       const p = posiciones.get(u.id);
-      const k = Math.round(p[0] * 20) + ':' + Math.round(p[1] * 20);
-      if (!grupos.has(k)) grupos.set(k, { pos: p, unidades: [] });
+      const averiada = u.estado === 'AVERIADA';       // v03: las averiadas se agrupan aparte
+      const k = Math.round(p[0] * 20) + ':' + Math.round(p[1] * 20) + (averiada ? ':av' : '');
+      if (!grupos.has(k)) grupos.set(k, { pos: p, unidades: [], averiada });
       grupos.get(k).unidades.push(u);
     }
     dibujadas = [];
     for (const gr of grupos.values()) {
       const u = gr.unidades.find((x) => resaltadas.has(x.id)) || gr.unidades[0];
-      const [px, py] = aPantalla(gr.pos[0], gr.pos[1], g);
+      let [px, py] = aPantalla(gr.pos[0], gr.pos[1], g);
+      if (gr.averiada && enAlmacen(gr.pos)) { px -= 26; py -= 20; }   // en el almacén central: junto a su ícono
       dibujadas.push({ px, py, unidades: gr.unidades });
       const foco = gr.unidades.some((x) => resaltadas.has(x.id));
+      if (gr.averiada) { dibujarAveriada(gr, u, px, py, foco); continue; }
       const c = u.estado === 'MANTENIMIENTO' ? col.gris : u.estado === 'REFRIGERIO' ? col.violeta : col.cian;
       ctx.fillStyle = hexA(col.fondo, 0.78);
       ctx.beginPath(); ctx.arc(px, py, foco ? 14 : 11.5, 0, 7); ctx.fill();
       if (foco) { ctx.strokeStyle = col.cian; ctx.lineWidth = 2; ctx.stroke(); }
-      if (u.estado === 'ENTREGANDO') {     // anillo punteado: está entregando al cliente (1 h)
-        ctx.setLineDash([2.5, 3]); ctx.strokeStyle = col.cian; ctx.lineWidth = 1.4;
+      if (u.estado === 'ENTREGANDO' || u.estado === 'TRASVASE') {   // anillo punteado: entrega (1 h) o trasvase (v03)
+        ctx.setLineDash([2.5, 3]); ctx.strokeStyle = u.estado === 'TRASVASE' ? col.naranja : col.cian; ctx.lineWidth = 1.4;
         ctx.beginPath(); ctx.arc(px, py, foco ? 18 : 15, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+      } else if (vaATrasvasar(u)) {   // anillo continuo: en camino a recoger paquetes de una averiada (v03)
+        ctx.strokeStyle = col.naranja; ctx.lineWidth = 1.4;
+        ctx.beginPath(); ctx.arc(px, py, foco ? 18 : 15, 0, 7); ctx.stroke();
       }
       glifo(u.tipo, px, py, c, rumbo(u, gr.pos), foco ? 1.25 : 1);
       if (gr.unidades.length > 1) {
@@ -375,6 +393,31 @@
       }
     }
   }
+
+  /**
+   * v03: unidad averiada, detenida en su posición, con un distintivo rojo y el tipo de avería (DS GUI, tabla 3).
+   * Mientras sigue en el lugar la rodea un halo rojo; si hay varias juntas, el distintivo muestra cuántas son.
+   */
+  function dibujarAveriada(gr, u, px, py, foco) {
+    const enLugar = gr.unidades.some((x) => x.averia && x.averia.fase === 'EN_LUGAR');
+    const latido = enLugar && estado.estado === 'EJECUTANDO' ? (Math.sin(performance.now() / 260) + 1) / 2 : 0;
+    ctx.fillStyle = hexA(col.rojo, enLugar ? 0.14 + 0.12 * latido : 0.1);
+    ctx.beginPath(); ctx.arc(px, py, (foco ? 19 : 16) + 3 * latido, 0, 7); ctx.fill();
+    ctx.fillStyle = hexA(col.fondo, 0.86); ctx.beginPath(); ctx.arc(px, py, foco ? 14 : 11.5, 0, 7); ctx.fill();
+    ctx.strokeStyle = foco ? col.cian : col.rojo; ctx.lineWidth = foco ? 2.2 : 1.6; ctx.stroke();
+    glifo(u.tipo, px, py, col['texto-2'], 1, foco ? 1.25 : 1);
+    // distintivo relleno con el tipo de avería; con varias averiadas juntas, de contorno y con la cantidad
+    const varias = gr.unidades.length > 1;
+    ctx.fillStyle = varias ? col.fondo : col.rojo; ctx.beginPath(); ctx.arc(px + 11, py - 10, 8, 0, 7); ctx.fill();
+    ctx.strokeStyle = varias ? col.rojo : col.fondo; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = varias ? col.rojo : '#fff'; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(varias ? String(gr.unidades.length) : String(u.averia ? u.averia.tipo : '!'), px + 11, py - 6.5);
+    if (foco && sel && sel.tipo === 'unidad') {
+      ctx.font = '600 12px "Cascadia Mono", Consolas, monospace'; ctx.fillStyle = col.texto; ctx.textAlign = 'left';
+      ctx.fillText(sel.id, px + 21, py - 12);
+    }
+  }
+  function enAlmacen(pos) { return estado.almacenes.some((a) => Math.abs(a.x - pos[0]) < 0.01 && Math.abs(a.y - pos[1]) < 0.01); }
 
   /** Ícono de auto, moto o bicicleta (vista lateral), mirando a la derecha (sentido 1) o a la izquierda (-1). */
   function glifo(tipo, x, y, color, sentido, esc) {
@@ -466,6 +509,11 @@
     $('dVencidos').className = r.vencidos ? 't-ROJO' : '';
     $('dFlota').textContent = `${r.unidadesDisponibles} / ${r.flota}`;
     $('dMant').textContent = num(r.unidadesMantenimiento);
+    $('dAveriadas').textContent = `${r.averiadasTipo1} · ${r.averiadasTipo2} · ${r.averiadasTipo3}`;   // v03
+    $('dAveriadas').className = r.unidadesAveriadas ? 't-ROJO' : '';
+    $('nPedidos').textContent = num(estado.pedidos.length);
+    $('nAverias').textContent = num(r.unidadesAveriadas);
+    $('tabAverias').classList.toggle('hay', r.unidadesAveriadas > 0);
     $('dKm').textContent = num(r.km) + ' km';
     $('dCosto').textContent = 'S/ ' + num(r.costo);
   }
@@ -481,6 +529,7 @@
     const base = fechaLocal(estado.hora);
     const sim = base ? new Date(base.getTime() + dt * estado.factor * 1000) : null;
     $('reloj').textContent = fmtFecha(sim);
+    if ($('modalAveria').open) $('avMomento').textContent = `La avería ocurre en el instante actual de la simulación: ${fmtFecha(sim)}.`;
     $('tReal').textContent = 'Real ' + fmtDur(estado.segundosReales + dt);
     $('tHoy').textContent = 'Hoy ' + fmtFecha(new Date());
   }
@@ -563,6 +612,7 @@
     else if (sel && sel.tipo === 'unidad') seleccionar(null);
     botonLimpiar();
     actualizarLista();
+    actualizarListaAverias();
   });
   $('limpiarBuscar').onclick = () => { limpiarFiltro(); $('buscar').focus(); };
   $('listaAlmacenes').addEventListener('pointerdown', (ev) => {
@@ -593,6 +643,7 @@
     if (s && centrar) centrarEn(s);
     mostrarDetalle();
     actualizarLista();
+    actualizarListaAverias();
     sucio = true;
   }
   function centrarEn(s) {
@@ -613,35 +664,50 @@
   }
 
   function mostrarDetalle() {
-    const caja = $('detalle'), cuerpo = $('detalleCuerpo');
+    const caja = $('detalle'), cuerpo = $('detalleCuerpo'), acciones = $('detalleAcciones');
+    acciones.hidden = true;
     if (!sel || !estado || !estado.unidades) { caja.hidden = true; return; }
     caja.hidden = false;
+    let html = '';
     if (sel.tipo === 'unidad') {
       const u = estado.unidades.find((x) => x.id === sel.id);
       if (!u) { caja.hidden = true; return; }
       const entregas = u.paradas.filter((p) => p.tipo === 'ENTREGA');
       const pedidosU = [...new Set(entregas.map((p) => p.ref))];
+      const av = averiaDe(u);
       let n = 0;
-      cuerpo.innerHTML = `<h4>${u.id} <span class="chip ${u.estado}">${ESTADOS_U[u.estado] || u.estado}</span></h4>
+      const chip = u.averia ? `<span class="chip AVERIADA">Averiada · tipo ${u.averia.tipo}</span>`
+        : `<span class="chip ${u.estado}">${ESTADOS_U[u.estado] || u.estado}</span>`;
+      const paradas = u.paradas.length ? `${av ? '<p class="nota">Plan para cuando termine la avería:</p>' : ''}<ul class="paradas">${u.paradas.slice(0, 8).map((p) => {
+        const trv = p.tipo === 'RECARGA' && esTrasvase(p.ref);
+        return `<li><b>${p.tipo === 'ENTREGA' ? ++n : trv ? 'T' : p.tipo === 'RECARGA' ? 'R' : 'C'}</b>${
+          p.tipo === 'ENTREGA' ? `Entregar ${p.cantidad} a ${p.ref} en (${p.x}, ${p.y})`
+            : trv ? `Recoger ${p.cantidad} paquetes de ${p.ref.slice(4)} (trasvase)`
+              : p.tipo === 'RECARGA' ? `Recargar en ${nombreAlmacen(p.ref)}` : 'Refrigerio (1 h)'}</li>`;
+      }).join('')}${u.paradas.length > 8 ? `<li><b></b>y ${u.paradas.length - 8} paradas más</li>` : ''}</ul>` : '';
+      const nota = u.paradas.length || av ? '' : `<p class="nota">${u.estado === 'MANTENIMIENTO'
+        ? `Fuera de servicio por mantenimiento preventivo hasta el ${fmtCorta(u.noDisponibleHasta)}.` : 'Sin paradas asignadas.'}</p>`;
+      html = `<h4>${u.id} ${chip}</h4>
         <div class="sub">${TIPOS[u.tipo]} · ${u.km} km recorridos</div>
         <dl><dt>Carga</dt><dd class="t-${u.nivel}">${u.carga} / ${u.capacidad} paquetes</dd>
         <dt>Posición</dt><dd>(${u.x.toFixed(1)}, ${u.y.toFixed(1)})</dd>
-        <dt>Pedidos asignados</dt><dd>${pedidosU.length ? pedidosU.join(', ') : '—'}</dd></dl>
-        ${u.paradas.length ? `<ul class="paradas">${u.paradas.slice(0, 8).map((p) => `<li><b>${p.tipo === 'ENTREGA' ? ++n : p.tipo === 'RECARGA' ? 'R' : 'C'}</b>${
-          p.tipo === 'ENTREGA' ? `Entregar ${p.cantidad} a ${p.ref} en (${p.x}, ${p.y})`
-            : p.tipo === 'RECARGA' ? `Recargar en ${nombreAlmacen(p.ref)}` : 'Refrigerio (1 h)'}</li>`).join('')}${u.paradas.length > 8 ? `<li><b></b>y ${u.paradas.length - 8} paradas más</li>` : ''}</ul>`
-          : `<p class="nota">${u.estado === 'MANTENIMIENTO' ? 'Fuera de servicio por mantenimiento preventivo durante todo el día.' : 'Sin paradas asignadas.'}</p>`}`;
+        <dt>Pedidos asignados</dt><dd>${pedidosU.length ? pedidosU.join(', ') : '—'}</dd>${av ? filasAveria(av) : ''}</dl>
+        ${av ? `<p class="estado-av">${textoFaseAveria(av)}</p>` : ''}${paradas}${nota}`;
+      // v03: desde el detalle se registra la avería de una unidad operativa (DS GUI, sección 3.4)
+      if (puedeAveriarse(u)) { acciones.hidden = false; $('btnAveriarUnidad').dataset.unidad = u.id; }
     } else if (sel.tipo === 'almacen') {
       const a = estado.almacenes.find((x) => x.id === sel.id);
-      cuerpo.innerHTML = `<h4>${esc(a.nombre)}</h4>
+      const aqui = averiadasEn(a);
+      html = `<h4>${esc(a.nombre)}</h4>
         <div class="sub">${a.central ? 'Almacén central, permanentemente abastecido' : 'Almacén intermedio, se recarga a 1 000 unidades a las 23:59:59'}</div>
         <dl><dt>Ubicación</dt><dd>(${a.x}, ${a.y})</dd>
         ${a.central ? '<dt>Stock</dt><dd>ilimitado</dd>' : `<dt>Stock</dt><dd>${num(a.stock)} / ${num(a.capacidad)}</dd><dt>Consumido</dt><dd class="t-${a.nivel}">${a.consumoPct.toFixed(1)}%</dd>`}
-        <dt>Vienen a recargar</dt><dd>${a.recargan.length ? a.recargan.join(', ') : '—'}</dd></dl>`;
+        <dt>Vienen a recargar</dt><dd>${a.recargan.length ? a.recargan.join(', ') : '—'}</dd>
+        ${aqui.length ? `<dt>Averiadas aquí</dt><dd class="t-ROJO">${aqui.map((u) => `${u.id} (tipo ${u.averia.tipo})`).join(', ')}</dd>` : ''}</dl>`;
     } else if (sel.tipo === 'pedido') {
       const p = estado.pedidos.find((x) => x.id === sel.id);
-      if (!p) { cuerpo.innerHTML = `<h4>${esc(sel.id)} <span class="chip DISPONIBLE">Entregado</span></h4><p class="nota">El pedido ya se entregó por completo y salió de la lista de pedidos en curso.</p>`; return; }
-      cuerpo.innerHTML = `<h4>${p.id} ${p.vencido ? '<span class="chip rojo">Vencido</span>' : ''}</h4>
+      if (!p) html = `<h4>${esc(sel.id)} <span class="chip DISPONIBLE">Entregado</span></h4><p class="nota">El pedido ya se entregó por completo y salió de la lista de pedidos en curso.</p>`;
+      else html = `<h4>${p.id} ${p.vencido ? '<span class="chip rojo">Vencido</span>' : ''}</h4>
         <div class="sub">Cliente ${esc(p.cliente)} · nodo (${p.x}, ${p.y})</div>
         <dl><dt>Cantidad</dt><dd>${p.cantidad} (entregado ${p.entregado}, en camino ${p.asignado})</dd>
         <dt>Plazo</dt><dd>${p.plazo} h</dd>
@@ -651,12 +717,247 @@
     } else if (sel.tipo === 'bloqueo') {
       const b = estado.bloqueos[sel.id];
       if (!b) { caja.hidden = true; sel = null; return; }
-      cuerpo.innerHTML = `<h4>Calle bloqueada</h4><div class="sub">No se puede atravesar ni girar en sus nodos</div>
+      html = `<h4>Calle bloqueada</h4><div class="sub">No se puede atravesar ni girar en sus nodos</div>
         <dl><dt>Desde</dt><dd>${fmtCorta(b.inicio)}</dd><dt>Hasta</dt><dd>${fmtCorta(b.fin)}</dd>
         <dt>Tramos</dt><dd>${b.vertices.map((v) => `(${v[0]}, ${v[1]})`).join(' → ')}</dd></dl>`;
     }
+    if (cuerpo._html !== html) { cuerpo.innerHTML = html; cuerpo._html = html; }   // sin parpadeo si no cambió
   }
-  function nombreAlmacen(id) { const a = estado.almacenes.find((x) => x.id === id); return a ? a.nombre : id; }
+
+  // ================================================================ v03: averías
+  /** Avería vigente de una unidad, con todo su detalle (de la lista estado.averias). */
+  function averiaDe(u) {
+    if (!u || !u.averia || !estado || !estado.averias) return null;
+    return estado.averias.find((a) => a.id === u.averia.id) || null;
+  }
+  /** Unidades que vienen a trasvasar los paquetes de una averiada o que lo están haciendo ahora. */
+  function ayudantes(av) {
+    if (!av) return [];
+    const ahora = av.receptoras.filter((r) => estado.unidades.some((u) => u.id === r && u.estado === 'TRASVASE'));
+    return [...new Set([...av.vanATrasvasar, ...ahora])];
+  }
+  function puedeAveriarse(u) {
+    return !!estado && (estado.estado === 'EJECUTANDO' || estado.estado === 'PAUSADA') && !u.averia && u.estado !== 'MANTENIMIENTO';
+  }
+  function averiadasEn(a) {
+    return estado.unidades.filter((u) => u.averia && u.averia.fase === 'EN_CENTRAL' && Math.abs(u.x - a.x) < 0.01 && Math.abs(u.y - a.y) < 0.01);
+  }
+  const mayuscula = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+  const hhmm = (iso) => { const d = fechaLocal(iso); return d ? `${dos(d.getHours())}:${dos(d.getMinutes())}` : '--'; };
+  /** Tiempo simulado que falta para un instante: "faltan 2 h 15 min". */
+  function faltan(iso) {
+    const d = fechaLocal(iso), ahora = fechaLocal(estado.hora);
+    if (!d || !ahora) return '';
+    const min = Math.max(0, Math.round((d - ahora) / 60000));
+    if (min === 0) return 'ya';
+    const dias = Math.floor(min / 1440), h = Math.floor(min % 1440 / 60), m = min % 60;
+    return 'faltan ' + (dias ? `${dias} d ` : '') + (h ? `${h} h ` : '') + (dias ? '' : `${m} min`);
+  }
+  function duracion(desde, hasta) {
+    const a = fechaLocal(desde), b = fechaLocal(hasta);
+    if (!a || !b) return '';
+    const min = Math.max(0, Math.round((b - a) / 60000));
+    return `${Math.floor(min / 60)} h ${dos(min % 60)} min`;
+  }
+  function filasAveria(av) {
+    let f = `<dt>Avería</dt><dd class="t-ROJO">Tipo ${av.tipo} (${NOMBRE_TIPO_AV[av.tipo]})</dd>
+      <dt>Ocurrió</dt><dd>${fmtCorta(av.inicio)} · ${av.origen === 'ARCHIVO' ? 'programada' : 'registrada'}</dd>
+      <dt>Lugar</dt><dd>(${av.x.toFixed(1)}, ${av.y.toFixed(1)})</dd>`;
+    if (av.tipo > 1) f += `<dt>En el lugar hasta</dt><dd>${fmtCorta(av.finLugar)}</dd>`;
+    f += `<dt>Disponible desde</dt><dd>${fmtCorta(av.disponible)}</dd>`;
+    if (av.tipo > 1) {
+      f += `<dt>Trasvasados</dt><dd>${av.trasvasados}${av.receptoras.length ? ' a ' + av.receptoras.join(', ') : ''}</dd>`;
+      if (av.vanATrasvasar.length) f += `<dt>Vienen a trasvasar</dt><dd>${av.vanATrasvasar.join(', ')}</dd>`;
+      if (av.fase !== 'EN_LUGAR') f += `<dt>Devueltos al central</dt><dd>${av.devueltos}</dd>`;
+    }
+    return f + `<dt>Pedidos replanificados</dt><dd>${av.pedidos.length ? av.pedidos.join(', ') : 'ninguno'}</dd>`;
+  }
+  function textoFaseAveria(av) {
+    if (av.fase === 'EN_CENTRAL') return `En el almacén central, fuera de servicio hasta el ${fmtCorta(av.disponible)} (${faltan(av.disponible)}).`;
+    if (av.tipo === 1) return `Detenida en su posición con su carga; vuelve a operar a las ${hhmm(av.disponible)} (${faltan(av.disponible)}).`;
+    const trasvase = av.trasvasable && av.cargaActual > 0
+      ? `Sus ${av.cargaActual} paquetes se pueden trasvasar hasta las ${hhmm(av.finLugar)}; luego` : 'A las ' + hhmm(av.finLugar);
+    return `Detenida en su posición. ${trasvase} pasa de forma instantánea al almacén central (${faltan(av.finLugar)}).`;
+  }
+
+  // ---- lista de unidades averiadas por tipo e historial (pestaña Averías del panel derecho)
+  const elementosAveria = new Map();
+  let pestana = 'pedidos';
+  function elegirPestana(p) {
+    pestana = p;
+    for (const [id, vista, nombre] of [['tabPedidos', 'vistaPedidos', 'pedidos'], ['tabAverias', 'vistaAverias', 'averias']]) {
+      $(id).classList.toggle('activa', p === nombre);
+      $(id).setAttribute('aria-selected', String(p === nombre));
+      $(vista).hidden = p !== nombre;
+    }
+    $('tituloDer').textContent = p === 'pedidos' ? 'Rastreo de entregas' : 'Unidades averiadas';
+    actualizarListaAverias();
+  }
+  $('tabPedidos').onclick = () => elegirPestana('pedidos');
+  $('tabAverias').onclick = () => elegirPestana('averias');
+
+  function htmlAveria(a) {
+    const activa = a.fase !== 'FINALIZADA';
+    let info;
+    if (!activa) info = `${fmtCorta(a.inicio)} → ${fmtCorta(a.fin)} (${duracion(a.inicio, a.fin)}) · ${a.pedidos.length} ${a.pedidos.length === 1 ? 'pedido replanificado' : 'pedidos replanificados'}`;
+    else if (a.fase === 'EN_CENTRAL') info = `Fuera de servicio en el almacén central · ${a.devueltos} paquetes devueltos`;
+    else if (a.tipo === 1) info = `Detenida en (${a.x.toFixed(1)}, ${a.y.toFixed(1)}) con ${a.cargaActual} paquetes`;
+    else if (a.trasvasable && a.cargaActual > 0) info = `Detenida en (${a.x.toFixed(1)}, ${a.y.toFixed(1)}) · ${a.cargaActual} paquetes por trasvasar hasta las ${hhmm(a.finLugar)}`;
+    else info = `Detenida en (${a.x.toFixed(1)}, ${a.y.toFixed(1)}) con ${a.cargaActual} paquetes · al almacén central a las ${hhmm(a.finLugar)}`;
+    let extra = activa ? `Ocurrió ${fmtCorta(a.inicio)} · disponible ${fmtCorta(a.disponible)}`
+      : a.tipo > 1 ? `Trasvasados ${a.trasvasados} · devueltos al central ${a.devueltos}` : '';
+    if (activa && a.vanATrasvasar.length) extra += ` · vienen ${a.vanATrasvasar.join(', ')}`;
+    let barra = '';
+    if (activa) {
+      const i = fechaLocal(a.inicio), d = fechaLocal(a.disponible), ahora = fechaLocal(estado.hora);
+      const f = d > i ? Math.max(0, Math.min(1, (ahora - i) / (d - i))) : 1;
+      barra = `<span class="barra-av" title="Tiempo transcurrido de la avería"><span class="riel"><span class="lleno AV" style="width:${Math.round(f * 100)}%"></span></span><small>${faltan(a.disponible)}</small></span>`;
+    }
+    return `<span class="cod">${iconoUnidad(a.tipoUnidad)}${a.unidad}<span class="tipo-av t${a.tipo}">Tipo ${a.tipo}</span></span>
+      <span class="fase ${a.fase}">${FASES_AV[a.fase]}</span>
+      <span class="info">${info}</span>${extra ? `<span class="info">${extra}</span>` : ''}${barra}`;
+  }
+  function actualizarListaAverias() {
+    const todas = estado && estado.averias ? estado.averias : [];
+    const activasTodas = todas.filter((a) => a.fase !== 'FINALIZADA');
+    const reglas = estado && estado.reglasAveria;
+    const htmlRes = [1, 2, 3].map((t) => {
+      const n = activasTodas.filter((a) => a.tipo === t).length;
+      return `<div class="${n ? 'con' : ''}"><b>${n}</b><span>Tipo ${t} · ${NOMBRE_TIPO_AV[t]}</span></div>`;
+    }).join('');
+    if ($('resumenAverias')._html !== htmlRes) { $('resumenAverias').innerHTML = htmlRes; $('resumenAverias')._html = htmlRes; }
+    $('btnNuevaAveria').disabled = !(estado && (estado.estado === 'EJECUTANDO' || estado.estado === 'PAUSADA'));
+    if (pestana !== 'averias') return;
+
+    const q = $('buscar').value.trim().toLowerCase();
+    const coincide = (a) => !q || a.unidad.toLowerCase().includes(q) || a.id.toLowerCase().includes(q) || a.pedidos.some((p) => p.toLowerCase() === q);
+    const activas = activasTodas.filter(coincide);
+    const terminadas = todas.filter((a) => a.fase === 'FINALIZADA' && coincide(a));
+    const filas = [];
+    const reglaTipo = {
+      1: `${cfgAveria.tipo1Horas} h detenida, sigue con su carga`,
+      2: `${cfgAveria.enLugarHoras} h en el lugar, vuelve al final del turno siguiente`,
+      3: `${cfgAveria.enLugarHoras} h en el lugar, vuelve tras ${cfgAveria.tipo3Dias} días a las ${cfgAveria.tipo3Hora}`,
+    };
+    for (const t of [1, 2, 3]) {
+      const del = activas.filter((a) => a.tipo === t);
+      filas.push({ clave: 'g' + t, clase: 'grupo-av', html: `<span>Tipo ${t} · ${NOMBRE_TIPO_AV[t]} <small>${reglaTipo[t]}</small></span><b>${del.length}</b>` });
+      del.forEach((a) => filas.push({ clave: a.id, clase: 'averia t' + a.tipo, unidad: a.unidad, html: htmlAveria(a) }));
+      if (!del.length) filas.push({ clave: 'v' + t, clase: 'vacio-av', html: q ? 'Ninguna coincide con la búsqueda.' : 'Ninguna unidad con este tipo de avería.' });
+    }
+    if (terminadas.length) {
+      filas.push({ clave: 'gh', clase: 'grupo-av', html: `<span>Historial <small>averías terminadas</small></span><b>${terminadas.length}</b>` });
+      terminadas.forEach((a) => filas.push({ clave: a.id, clase: 'averia fin t' + a.tipo, unidad: a.unidad, html: htmlAveria(a) }));
+    }
+    if (!todas.length) filas.push({ clave: 'nada', clase: 'lista-vacia', html: estado && estado.unidades
+      ? `Sin averías por ahora.${reglas && estado.escenario !== 'DIA_A_DIA' ? ' Las programadas en datos/averias.aaaamm.txt aparecen aquí al ocurrir.' : ''}` : 'Inicia una simulación para registrar averías.' });
+
+    const ul = $('listaAverias');
+    const vistos = new Set();
+    filas.forEach((f, i) => {
+      let li = elementosAveria.get(f.clave);
+      if (!li) { li = document.createElement('li'); elementosAveria.set(f.clave, li); if (f.unidad) li.tabIndex = 0; }
+      if (li.className !== f.clase) li.className = f.clase;
+      if (f.unidad) li.dataset.unidad = f.unidad;
+      if (li._html !== f.html) { li.innerHTML = f.html; li._html = f.html; }
+      li.classList.toggle('sel', !!(f.unidad && f.clase.indexOf('fin') < 0 && sel && sel.tipo === 'unidad' && sel.id === f.unidad));
+      if (ul.children[i] !== li) ul.insertBefore(li, ul.children[i] || null);
+      vistos.add(f.clave);
+    });
+    for (const [clave, li] of elementosAveria) if (!vistos.has(clave)) { li.remove(); elementosAveria.delete(clave); }
+  }
+  /** Del panel al mapa: al elegir una unidad averiada, el mapa se centra en ella y la resalta. */
+  function elegirAveria(ev) {
+    const li = ev.target.closest('.averia');
+    if (!li) return;
+    const id = li.dataset.unidad;
+    if (sel && sel.tipo === 'unidad' && sel.id === id) seleccionar(null);
+    else { quitarFiltroUnidad(); seleccionar({ tipo: 'unidad', id }, true); }
+  }
+  $('listaAverias').addEventListener('pointerdown', elegirAveria);
+  $('listaAverias').addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); elegirAveria(ev); } });
+
+  // ---- diálogo "Registrar avería" (la confirmación se hace en el mismo diálogo)
+  let cfgAveria = { tipo1Horas: 2, enLugarHoras: 4, tipo3Dias: 2, tipo3Hora: '15:00', trasvaseMin: 30 };
+  const propias = new Set();       // averías registradas desde este navegador (su aviso ya se mostró)
+  function abrirRegistroAveria(preferida) {
+    if (!estado || !(estado.estado === 'EJECUTANDO' || estado.estado === 'PAUSADA')) { avisar('Inicia una simulación para registrar averías.', 'alerta'); return; }
+    const orden = { EN_RUTA: 0, ENTREGANDO: 1, TRASVASE: 2, REFRIGERIO: 3, DISPONIBLE: 4 };
+    const opciones = estado.unidades.filter((u) => !u.averia && u.estado !== 'MANTENIMIENTO')
+      .sort((a, b) => ((orden[a.estado] ?? 9) - (orden[b.estado] ?? 9)) || a.id.localeCompare(b.id));
+    if (!opciones.length) { avisar('No hay unidades operativas para registrar una avería.', 'alerta'); return; }
+    $('avUnidad').innerHTML = opciones.map((u) => `<option value="${u.id}">${u.id} · ${TIPOS[u.tipo]} · ${ESTADOS_U[u.estado] || u.estado} · ${u.carga}/${u.capacidad} paquetes</option>`).join('');
+    $('avUnidad').value = preferida && opciones.some((u) => u.id === preferida) ? preferida : opciones[0].id;
+    $('avDesc1').textContent = `Queda detenida ${cfgAveria.tipo1Horas} h en su posición con su carga y luego sigue operando.`;
+    $('avDesc2').textContent = `Permanece ${cfgAveria.enLugarHoras} h en el lugar (sus paquetes se pueden trasvasar a otra unidad en ${cfgAveria.trasvaseMin} min) y luego pasa al almacén central. Vuelve al final del turno siguiente.`;
+    $('avDesc3').textContent = `Permanece ${cfgAveria.enLugarHoras} h en el lugar y luego pasa al almacén central. Vuelve tras al menos ${cfgAveria.tipo3Dias} días, en el turno de ${cfgAveria.tipo3Hora}.`;
+    $('avError').hidden = true;
+    actualizarDialogoAveria();
+    $('modalAveria').showModal();
+  }
+  function actualizarDialogoAveria() {
+    if (!$('modalAveria').open || !estado || !estado.reglasAveria) return;
+    const r = estado.reglasAveria;
+    $('avEst1').textContent = `Disponible: ${fmtCorta(r.disponibleTipo1)}`;
+    $('avEst2').textContent = `Al almacén central: ${fmtCorta(r.trasladoTipo23)} · disponible: ${fmtCorta(r.disponibleTipo2)}`;
+    $('avEst3').textContent = `Al almacén central: ${fmtCorta(r.trasladoTipo23)} · disponible: ${fmtCorta(r.disponibleTipo3)}`;
+    const u = estado.unidades.find((x) => x.id === $('avUnidad').value);
+    if (u) {
+      const ped = [...new Set(u.paradas.filter((p) => p.tipo === 'ENTREGA').map((p) => p.ref))];
+      $('avEfecto').textContent = `${u.id} queda detenida en (${u.x.toFixed(1)}, ${u.y.toFixed(1)}) con ${u.carga} paquetes. `
+        + (ped.length ? `${mayuscula(pedidosReplanificados(ped.length))} de inmediato (${ped.slice(0, 6).join(', ')}${ped.length > 6 ? '…' : ''}).` : 'No tiene pedidos asignados en este momento.')
+        + ' La calle no se bloquea.';
+    }
+  }
+  $('avUnidad').addEventListener('change', actualizarDialogoAveria);
+  $('avCancelar').onclick = () => $('modalAveria').close();
+  $('avConfirmar').onclick = async () => {
+    const unidad = $('avUnidad').value;
+    const tipo = document.querySelector('input[name="avTipo"]:checked').value;
+    if (!unidad) return;
+    $('avConfirmar').disabled = true;
+    try {
+      const r = await post(`/api/averias?unidad=${encodeURIComponent(unidad)}&tipo=${tipo}`);
+      const av = r.averia;
+      propias.add(av.id);
+      $('modalAveria').close();
+      avisar(`Avería tipo ${av.tipo} registrada en ${av.unidad}: queda detenida en (${av.x.toFixed(1)}, ${av.y.toFixed(1)})`
+        + (av.pedidos.length ? ` y ${pedidosReplanificados(av.pedidos.length)}` : '') + `. Disponible el ${fmtCorta(av.disponible)}.`, 'error');
+      quitarFiltroUnidad();
+      seleccionar({ tipo: 'unidad', id: av.unidad }, true);
+    } catch (e) {
+      $('avError').textContent = 'No se pudo registrar: ' + e.message;
+      $('avError').hidden = false;
+    } finally {
+      $('avConfirmar').disabled = false;
+    }
+  };
+  $('btnNuevaAveria').onclick = () => abrirRegistroAveria(sel && sel.tipo === 'unidad' ? sel.id : null);
+  $('btnAveriarUnidad').onclick = (ev) => abrirRegistroAveria(ev.currentTarget.dataset.unidad);
+
+  /** Avisos de las averías que ocurren (archivo o en otro dispositivo), de los traslados, trasvases y retornos. */
+  function avisosAverias(prev) {
+    if (!prev || !prev.averias || !estado.averias || prev.inicio !== estado.inicio || prev.escenario !== estado.escenario) return;
+    const antes = new Map(prev.averias.map((a) => [a.id, a]));
+    for (const a of [...estado.averias].reverse()) {
+      const p = antes.get(a.id);
+      if (!p) {
+        if (!propias.has(a.id)) {
+          avisar(`Avería tipo ${a.tipo} en ${a.unidad}${a.origen === 'ARCHIVO' ? ' (programada)' : ''}: `
+            + (a.pedidos.length ? `${pedidosReplanificados(a.pedidos.length)}.` : 'no tenía pedidos asignados.'), 'error');
+        }
+        continue;
+      }
+      for (const r of a.receptoras) if (!p.receptoras.includes(r)) avisar(`Trasvase: ${r} recoge paquetes de ${a.unidad}.`);
+      if (p.fase === 'EN_LUGAR' && a.fase === 'EN_CENTRAL') avisar(`${a.unidad} pasó al almacén central con ${a.devueltos} ${a.devueltos === 1 ? 'paquete no trasvasado' : 'paquetes no trasvasados'}.`, 'alerta');
+      if (p.fase !== 'FINALIZADA' && a.fase === 'FINALIZADA') avisar(`${a.unidad} vuelve a operar (avería tipo ${a.tipo}).`);
+    }
+  }
+
+  function nombreAlmacen(id) {
+    if (esTrasvase(id)) return 'trasvase de ' + id.slice(4);
+    const a = estado.almacenes.find((x) => x.id === id); return a ? a.nombre : id;
+  }
   $('cerrarDetalle').onclick = () => { if (sel && sel.tipo === 'unidad') limpiarFiltro(); else seleccionar(null); };
 
   // ================================================================ mouse: arrastrar, acercar, señalar
@@ -683,16 +984,27 @@
 
   function textoTooltip(o) {
     if (o.tipo === 'unidad') {
-      if (o.grupo.length > 1) return `<b>${o.grupo.length} unidades aquí</b><br><span>${o.grupo.map((u) => u.id).join(', ')}</span>`;
+      if (o.grupo.length > 1) return `<b>${o.grupo.length} unidades aquí</b><br><span>${o.grupo.map((u) => u.averia ? `${u.id} (avería tipo ${u.averia.tipo})` : u.id).join(', ')}</span>`;
       const u = o.grupo[0];
+      if (u.averia) {                    // v03: tipo de avería, hora de ocurrencia e indisponibilidad (DS GUI, tabla 3)
+        const a = u.averia;
+        const lugar = a.fase === 'EN_CENTRAL' ? 'en el almacén central' : a.tipo === 1 ? 'detenida en su posición' : `en el lugar hasta las ${hhmm(a.finLugar)}`;
+        return `<b>${u.id}</b> · ${TIPOS[u.tipo]}<br><span class="t-ROJO">Averiada · tipo ${a.tipo} (${NOMBRE_TIPO_AV[a.tipo]})</span>`
+          + `<br><span>Ocurrió ${fmtCorta(a.inicio)} · ${lugar}</span>`
+          + `<br><span>No disponible hasta ${fmtCorta(a.disponible)} (${faltan(a.disponible)})</span>`
+          + (u.carga ? `<br><span>${u.carga} paquetes a bordo</span>` : '');
+      }
       const prox = u.paradas[0];
       return `<b>${u.id}</b> · ${TIPOS[u.tipo]}<br><span>Carga ${u.carga}/${u.capacidad} (${Math.round(100 * u.carga / u.capacidad)}%) · ${ESTADOS_U[u.estado] || u.estado}</span>`
-        + (prox ? `<br><span>Próxima parada: ${prox.tipo === 'ENTREGA' ? 'entrega ' + prox.ref : prox.tipo === 'RECARGA' ? 'recarga en ' + nombreAlmacen(prox.ref) : 'refrigerio'}</span>` : '');
+        + (u.noDisponibleHasta ? `<br><span>No disponible hasta ${fmtCorta(u.noDisponibleHasta)}</span>` : '')
+        + (prox ? `<br><span>Próxima parada: ${prox.tipo === 'ENTREGA' ? 'entrega ' + prox.ref : prox.tipo === 'RECARGA' ? (esTrasvase(prox.ref) ? 'trasvase de ' + prox.ref.slice(4) : 'recarga en ' + nombreAlmacen(prox.ref)) : 'refrigerio'}</span>` : '');
     }
     if (o.tipo === 'almacen') {
       const a = estado.almacenes.find((x) => x.id === o.id);
+      const aqui = averiadasEn(a);
       return `<b>${esc(a.nombre)}</b><br><span>${a.central ? 'Stock ilimitado' : `Stock ${num(a.stock)} de ${num(a.capacidad)} · ${Math.round(a.consumoPct)}% consumido`}</span>`
-        + `<br><span>Vienen a recargar: ${a.recargan.length ? a.recargan.slice(0, 8).join(', ') + (a.recargan.length > 8 ? '…' : '') : 'ninguna'}</span>`;
+        + `<br><span>Vienen a recargar: ${a.recargan.length ? a.recargan.slice(0, 8).join(', ') + (a.recargan.length > 8 ? '…' : '') : 'ninguna'}</span>`
+        + (aqui.length ? `<br><span class="t-ROJO">Averiadas aquí: ${aqui.map((u) => `${u.id} (tipo ${u.averia.tipo})`).join(', ')}</span>` : '');
     }
     if (o.tipo === 'pedido') {
       const p = estado.pedidos.find((x) => x.id === o.id);
@@ -799,6 +1111,7 @@
       lineasAvisadas = clave;
       avisar(`${num(estado.lineasConError)} líneas de los archivos de datos no tienen el formato esperado y no se usaron. Revisa la consola del servidor.`, 'alerta');
     }
+    avisosAverias(prev);
     if (estado.error && estado.error !== errorMostrado) avisar('El planificador falló en este ciclo; las unidades siguen con su plan anterior. ' + estado.error, 'error');
     errorMostrado = estado.error;
     if (estado.estado === 'TERMINADA' && finMostrado !== clave) {
@@ -822,6 +1135,9 @@
       ['S/ ' + num(r.costo), 'Costo de transporte'],
       [num(estado.ciclos), 'Ciclos de planificación'],
       [num(estado.msMaximoPlan) + ' ms', 'Ta máximo'],
+      [num(r.averias), 'Averías (tipo 1, 2 y 3)'],
+      [num(r.trasvasados), 'Paquetes trasvasados'],
+      [num(r.devueltos), 'Devueltos al central'],
     ];
     $('finGrid').innerHTML = celdas.map(([v, t]) => `<div><b>${v}</b><span>${t}</span></div>`).join('');
     $('modalFin').showModal();
@@ -841,7 +1157,7 @@
     if (!v) { avisar('Elige la fecha y hora de inicio.', 'alerta'); $('fecha').focus(); return; }
     try {
       await post(`/api/simulacion?escenario=SEMANAL&fecha=${encodeURIComponent(v)}`);
-      sel = null; anterior = null; anim.clear(); finMostrado = '';
+      sel = null; anterior = null; anim.clear(); finMostrado = ''; propias.clear();
       $('buscar').value = ''; botonLimpiar();
       mostrarDetalle();
       avisar(`Simulación de 5 días iniciada desde el ${fmtFecha(fechaLocal(v))}.`);
@@ -858,6 +1174,10 @@
 
   fetch('/api/config').then((r) => r.json()).then((c) => {
     if (!$('fecha').value) $('fecha').value = `${c.fechaInicio}T${c.horaInicio || '00:00'}`;
+    if (c.averiaTipo1Horas !== undefined) {
+      cfgAveria = { tipo1Horas: c.averiaTipo1Horas, enLugarHoras: c.averiaEnLugarHoras, tipo3Dias: c.averiaTipo3Dias,
+        tipo3Hora: c.averiaTipo3Hora, trasvaseMin: c.averiaTrasvaseMinutos };
+    }
   }).catch(() => { $('fecha').value = '2026-01-01T00:00'; });
 
   // ================================================================ conexión con el servidor (SSE)
@@ -874,6 +1194,8 @@
       $('estado').classList.remove('desconectado');
       actualizarPaneles();
       actualizarLista();
+      actualizarListaAverias();
+      actualizarDialogoAveria();
       mostrarDetalle();
       revisarEventos(prev);
       sucio = true;
