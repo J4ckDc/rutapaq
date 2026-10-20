@@ -1,4 +1,4 @@
-/* RUTAPAQ v02 – Simulador de rutas. Sin dependencias externas: funciona sin internet en el laboratorio. */
+/* RUTAPAQ v03 – Simulador de rutas. Sin dependencias externas: funciona sin internet en el laboratorio. */
 
 :root, [data-theme="dark"] {
   --fondo: #08111f;
@@ -60,7 +60,7 @@ body {
   font: 14px/1.4 "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
   overflow: hidden;
 }
-button, input { font: inherit; color: inherit; }
+button, input, select { font: inherit; color: inherit; }
 svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 .num, .reloj, .kpi b, .ficha b, .datos b, .almacenes .pct { font-family: "Cascadia Mono", "Consolas", ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; }
 :focus-visible { outline: 2px solid var(--cian); outline-offset: 2px; }
@@ -299,6 +299,8 @@ nav { display: flex; flex-direction: column; gap: 2px; padding: 14px 8px; }
 .chip.REFRIGERIO { background: rgba(167, 139, 250, .16); color: var(--violeta); }
 .chip.DISPONIBLE { background: rgba(34, 197, 94, .14); color: var(--verde); }
 .chip.rojo { background: rgba(239, 68, 68, .15); color: var(--rojo); }
+.chip.AVERIADA { background: rgba(239, 68, 68, .15); color: var(--rojo); }
+.chip.TRASVASE { background: rgba(251, 138, 36, .16); color: var(--naranja); }
 
 /* tooltip del mapa */
 .tooltip {
@@ -341,6 +343,76 @@ nav { display: flex; flex-direction: column; gap: 2px; padding: 14px 8px; }
 .fin-grid span { color: var(--texto-2); font-size: 11.5px; }
 .modal-acciones { display: flex; justify-content: flex-end; gap: 8px; }
 .nota { color: var(--texto-2); font-size: 12px; }
+
+/* ------------------------------------------------------------------ v03: averías */
+.btn.peligro { background: var(--rojo); border-color: var(--rojo); color: #fff; }
+.btn.peligro:hover:not(:disabled) { border-color: var(--rojo); filter: brightness(1.1); }
+.btn-bloque { width: 100%; justify-content: center; margin-top: 12px; flex: none; }
+.btn.btn-bloque span { display: inline; }      /* su texto se ve también en pantallas pequeñas */
+
+/* pestañas del panel derecho: pedidos y averías */
+.pestanas { display: flex; gap: 4px; margin: 0 0 10px; padding: 3px; border: 1px solid var(--borde); border-radius: 8px; background: var(--superficie-2); flex: none; }
+.pestana { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; background: none; padding: 5px 8px; border-radius: 6px; color: var(--texto-2); cursor: pointer; font-size: 13px; font-weight: 600; }
+.pestana:hover:not(.activa) { color: var(--texto); }
+.pestana b { min-width: 20px; padding: 0 6px; border-radius: 9px; background: var(--borde); color: var(--texto-2); font: 600 11px "Cascadia Mono", Consolas, ui-monospace, monospace; line-height: 17px; }
+.pestana.activa { background: var(--cian); color: #04121c; }
+.pestana.activa b { background: rgba(4, 18, 28, .18); color: #04121c; }
+.pestana.hay b { background: var(--rojo); color: #fff; }
+.vista { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+
+/* lista de unidades averiadas por tipo e historial */
+.resumen-averias { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 10px 0 8px; flex: none; }
+.resumen-averias div { display: flex; flex-direction: column; border: 1px solid var(--borde); border-radius: 8px; padding: 6px 8px; background: var(--superficie-2); }
+.resumen-averias b { font: 600 18px "Cascadia Mono", Consolas, ui-monospace, monospace; line-height: 1.15; }
+.resumen-averias span { color: var(--texto-2); font-size: 11px; }
+.resumen-averias .con b { color: var(--rojo); }
+.averias { list-style: none; margin: 0 -14px; padding: 0 14px 14px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 7px; }
+.grupo-av { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; color: var(--texto-2); font-size: 11px; font-weight: 650; letter-spacing: .6px; text-transform: uppercase; }
+.grupo-av small { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--texto-3); }
+.grupo-av b { color: var(--texto); font-family: "Cascadia Mono", Consolas, ui-monospace, monospace; }
+.vacio-av { color: var(--texto-3); font-size: 12px; padding: 2px 0 4px; }
+.averia { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; border: 1px solid var(--borde); border-left: 3px solid var(--rojo); border-radius: 10px; padding: 8px 10px; background: var(--superficie-2); cursor: pointer; }
+.averia:hover { border-color: var(--borde-fuerte); border-left-color: var(--rojo); }
+.averia.sel { border-color: var(--cian); box-shadow: 0 0 0 1px var(--cian) inset; }
+.averia.fin { border-left-color: var(--borde-fuerte); }
+.averia .cod { display: inline-flex; align-items: center; gap: 6px; font: 650 13px "Cascadia Mono", Consolas, ui-monospace, monospace; color: var(--texto); }
+.averia .cod .ico-u { color: var(--texto-2); }
+.averia .fase { justify-self: end; align-self: start; padding: 1px 7px; border-radius: 5px; font-size: 10.5px; font-weight: 700; white-space: nowrap; }
+.fase.EN_LUGAR { background: rgba(239, 68, 68, .15); color: var(--rojo); }
+.fase.EN_CENTRAL { background: rgba(251, 138, 36, .16); color: var(--naranja); }
+.fase.FINALIZADA { background: rgba(34, 197, 94, .14); color: var(--verde); }
+.averia .info { grid-column: 1 / -1; color: var(--texto-2); font-size: 11.5px; }
+.averia .barra-av { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; margin-top: 4px; }
+.barra-av .lleno.AV { background: var(--rojo); }
+.tipo-av { padding: 0 6px; border: 1px solid; border-radius: 5px; font: 700 10.5px "Segoe UI", system-ui, sans-serif; }
+.tipo-av.t1 { color: var(--ambar); } .tipo-av.t2 { color: var(--naranja); } .tipo-av.t3 { color: var(--rojo); }
+
+/* detalle de una unidad: avería vigente y botón para registrar una */
+.detalle .acciones { display: flex; justify-content: flex-end; margin-top: 12px; }
+.detalle .estado-av { margin: 10px 0 0; padding: 8px 10px; border-radius: 8px; border-left: 3px solid var(--rojo); background: rgba(239, 68, 68, .08); color: var(--texto); font-size: 12px; }
+
+/* leyenda */
+.sim.averiada { position: relative; }
+.distintivo { position: absolute; top: -7px; left: 15px; display: grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; background: var(--rojo); color: #fff; font: 700 9.5px system-ui; font-style: normal; }
+.sim.anillo-trasvase { width: 28px; height: 28px; justify-content: center; border: 1.6px dashed var(--naranja); border-radius: 50%; }
+.sim.anillo-trasvase-camino { width: 28px; height: 28px; justify-content: center; border: 1.6px solid var(--naranja); border-radius: 50%; }
+.parada.roja { background: var(--rojo); }
+
+/* diálogo para registrar una avería */
+.campo { display: flex; flex-direction: column; gap: 4px; margin: 12px 0; color: var(--texto-2); font-size: 12.5px; }
+.campo select { height: 36px; padding: 0 8px; border: 1px solid var(--borde-fuerte); border-radius: 8px; background: var(--superficie-2); color: var(--texto); font-family: "Cascadia Mono", Consolas, ui-monospace, monospace; font-size: 12.5px; }
+.campo select:focus { outline: 2px solid var(--cian); outline-offset: 1px; }
+.tipos-averia { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 12px; padding: 0; border: 0; }
+.tipos-averia legend { margin-bottom: 6px; padding: 0; color: var(--texto-2); font-size: 12.5px; }
+.opcion-av { display: flex; align-items: flex-start; gap: 10px; padding: 9px 11px; border: 1px solid var(--borde); border-radius: 10px; background: var(--superficie-2); cursor: pointer; }
+.opcion-av:hover { border-color: var(--borde-fuerte); }
+.opcion-av:has(input:checked) { border-color: var(--rojo); box-shadow: 0 0 0 1px var(--rojo) inset; }
+.opcion-av input { margin-top: 3px; accent-color: var(--rojo); }
+.opcion-av > span { display: flex; flex-direction: column; gap: 2px; }
+.opcion-av b { font-size: 13.5px; }
+.opcion-av small { color: var(--texto-2); font-size: 12px; line-height: 1.35; }
+.opcion-av .estimado { color: var(--texto); font-family: "Cascadia Mono", Consolas, ui-monospace, monospace; font-size: 11.5px; }
+.error-form { margin: 0 0 12px; color: var(--rojo); font-size: 12.5px; }
 
 /* ------------------------------------------------------------------ pantallas medianas y pequeñas */
 @media (max-width: 1500px) {

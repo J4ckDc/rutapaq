@@ -153,20 +153,39 @@ public final class EvaluadorItinerario {
         return true;
     }
 
+    /**
+     * Desvio al almacen mas cercano con saldo suficiente.
+     *
+     * <p>v03, trasvase: un deposito temporal (unidad con averia tipo 2 o 3 que
+     * sigue en el lugar) solo se elige si la unidad alcanza a terminar la recogida
+     * antes de su cierre; alli completa su carga con los paquetes que queden (no
+     * hace falta que alcancen solos para la entrega), la recogida toma el tiempo de
+     * atencion (30 min) y el saldo del deposito se descuenta al recoger. Con los
+     * almacenes del caso (sin cierre ni tiempo de atencion) el resultado es
+     * identico al de la v02.</p>
+     */
     private static boolean recargar(DatosPlanificacion d, DatosPlanificacion.Unidad u, Traza tr,
                                     int necesario, int[] disponible, List<ParadaRuta> itinerario) {
         int mejor = -1;
         int mejorKm = Integer.MAX_VALUE;
         for (int a = 0; a < d.nAlm; a++) {
             int libre = d.infinito[a] ? Integer.MAX_VALUE : disponible[a] - tr.consumo[a];
-            if (libre < necesario) {
+            if (d.trasvase[a]) {
+                if (libre <= 0 || tr.carga + libre < necesario) {
+                    continue;
+                }
+            } else if (libre < necesario) {
                 continue;
             }
             int km = d.dist.km(tr.nodo, d.nodoAlmacen[a]);
-            if (km >= 0 && km < mejorKm) {
-                mejorKm = km;
-                mejor = a;
+            if (km < 0 || km >= mejorKm) {
+                continue;
             }
+            if (d.trasvase[a] && !terminaAntesDelCierre(d, u, tr, a, km)) {
+                continue;
+            }
+            mejorKm = km;
+            mejor = a;
         }
         if (mejor < 0) {
             tr.valida = false;
@@ -177,14 +196,33 @@ public final class EvaluadorItinerario {
         refrigerio(d, u, tr, itinerario);
         tr.nodo = d.nodoAlmacen[mejor];
         int libre = d.infinito[mejor] ? Integer.MAX_VALUE : disponible[mejor] - tr.consumo[mejor];
-        tr.carga = Math.min(u.capacidad, libre);
-        tr.almacenCarga = mejor;
+        long llegada = tr.t;
+        int cantidad;
+        if (d.trasvase[mejor]) {
+            cantidad = Math.min(u.capacidad - tr.carga, libre);
+            tr.carga += cantidad;
+            tr.consumo[mejor] += cantidad;
+            tr.t += d.atencion[mejor];
+        } else {
+            tr.carga = Math.min(u.capacidad, libre);
+            tr.almacenCarga = mejor;
+            cantidad = tr.carga;
+        }
         tr.recargas++;
         if (itinerario != null) {
             itinerario.add(new ParadaRuta(TipoParada.RECARGA, d.dist.nodoDe(d.nodoAlmacen[mejor]),
-                    d.almacenes[mejor].getId(), tr.carga, d.instanteDe(tr.t), d.instanteDe(tr.t), 0.0));
+                    d.almacenes[mejor].getId(), cantidad, d.instanteDe(llegada), d.instanteDe(tr.t), 0.0));
         }
         return true;
+    }
+
+    /** v03: la recogida en el deposito temporal debe terminar antes de que trasladen a la unidad averiada. */
+    private static boolean terminaAntesDelCierre(DatosPlanificacion d, DatosPlanificacion.Unidad u, Traza tr,
+                                                 int a, int km) {
+        Traza c = tr.copia();
+        c.t += DatosPlanificacion.viaje(km, u.velocidad);
+        refrigerio(d, u, c, null);
+        return c.t + d.atencion[a] <= d.cierre[a];
     }
 
     private static void refrigerio(DatosPlanificacion d, DatosPlanificacion.Unidad u, Traza tr,

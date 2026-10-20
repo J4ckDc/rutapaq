@@ -3,6 +3,7 @@ package pe.pucp.paqrap.app.web;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import pe.pucp.paqrap.app.Config;
+import pe.pucp.paqrap.app.modelo.Averia;
 import pe.pucp.paqrap.app.modelo.Nodo;
 import pe.pucp.paqrap.app.sim.Planificadores;
 import pe.pucp.paqrap.planner.core.Planificador;
@@ -34,6 +35,8 @@ import java.util.concurrent.TimeUnit;
  *   GET  /api/estado                                                           estado completo (JSON)
  *   GET  /api/stream                                                           estado cada N ms (SSE)
  *   POST /api/pedidos?x=&y=&cantidad=&plazo=&cliente=                          registro en línea
+ *   POST /api/averias?unidad=TA03&tipo=2                                       registra una avería (v03)
+ *   GET  /api/averias                                                          historial de averías del escenario (v03)
  *   GET  /api/config                                                           datos para la interfaz
  *   GET  /                                                                     visualizador
  */
@@ -62,6 +65,7 @@ public final class Servidor {
         s.createContext("/api/estado", ex -> responder(ex, 200, "application/json", estadoJson()));
         s.createContext("/api/stream", this::stream);
         s.createContext("/api/pedidos", this::pedido);
+        s.createContext("/api/averias", this::averias);
         s.createContext("/api/config", this::config);
         s.createContext("/", this::estatico);
         s.setExecutor(Executors.newCachedThreadPool());
@@ -204,11 +208,52 @@ public final class Servidor {
         }
     }
 
+    /**
+     * v03: averías. POST registra la avería de una unidad en el instante actual de la simulación (RF05-04, RF05-05)
+     * y responde con la avería registrada; GET devuelve el historial de averías del escenario en curso.
+     */
+    private void averias(HttpExchange ex) throws IOException {
+        Simulacion s = sim;
+        if (ex.getRequestMethod().equals("GET")) {
+            responder(ex, 200, "application/json", s == null ? "[]" : s.averiasJson());
+            return;
+        }
+        if (!ex.getRequestMethod().equals("POST")) {
+            responder(ex, 405, "text/plain", "Use GET o POST");
+            return;
+        }
+        if (s == null || s.estado() == Simulacion.Estado.TERMINADA) {
+            responder(ex, 409, "application/json", "{\"error\":\"no hay una simulación en curso\"}");
+            return;
+        }
+        Map<String, String> q = parametros(ex);
+        int tipo;
+        try {
+            tipo = Integer.parseInt(q.getOrDefault("tipo", "").trim());
+        } catch (NumberFormatException e) {
+            responder(ex, 400, "application/json", "{\"error\":\"el tipo de avería debe ser 1, 2 o 3\"}");
+            return;
+        }
+        try {
+            Averia av = s.registrarAveria(q.get("unidad"), tipo);
+            responder(ex, 200, "application/json", "{\"averia\":" + s.averiaJson(av) + "}");
+        } catch (IllegalArgumentException e) {
+            responder(ex, 400, "application/json", "{\"error\":" + Json.str(e.getMessage()) + "}");
+        } catch (IllegalStateException e) {
+            responder(ex, 409, "application/json", "{\"error\":" + Json.str(e.getMessage()) + "}");
+        }
+    }
+
     private void config(HttpExchange ex) throws IOException {
         responder(ex, 200, "application/json", "{\"algoritmo\":" + Json.str(cfg.texto("planificador.algoritmo", "ALNS"))
                 + ",\"fechaInicio\":" + Json.str(cfg.texto("escenario.fechaInicio", "2026-01-01"))
                 + ",\"horaInicio\":" + Json.str(cfg.texto("escenario.horaInicio", "00:00"))
-                + ",\"minutosSemanal\":" + Json.num(cfg.decimal("escenario.semanal.minutosReales", 30)) + "}");
+                + ",\"minutosSemanal\":" + Json.num(cfg.decimal("escenario.semanal.minutosReales", 30))
+                + ",\"averiaTipo1Horas\":" + Json.num(cfg.decimal("averia.tipo1.horas", 2))
+                + ",\"averiaEnLugarHoras\":" + Json.num(cfg.decimal("averia.enLugar.horas", 4))
+                + ",\"averiaTipo3Dias\":" + Json.num(cfg.decimal("averia.tipo3.diasMinimos", 2))
+                + ",\"averiaTipo3Hora\":" + Json.str(cfg.texto("averia.tipo3.horaRetorno", "15:00"))
+                + ",\"averiaTrasvaseMinutos\":" + Json.num(cfg.decimal("averia.trasvase.minutos", 30)) + "}");
     }
 
     // ---------------------------------------------------------------- archivos estáticos

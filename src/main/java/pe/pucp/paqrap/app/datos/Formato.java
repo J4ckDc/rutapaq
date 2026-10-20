@@ -16,6 +16,12 @@ import java.util.regex.Pattern;
  *
  * ventas.aaaamm.txt   ##d##h##m:x,y,idCliente,cantidad,plazoHoras         01d01h30m:56,30,c4910,02,36
  * bloqueo.aamm.txt    ##d##h##m-##d##h##m:x1,y1,x2,y2,...                 01d02h22m-01d04h42m:25,45,45,45,45,40
+ * averias.aaaamm.txt  ##d##h##m:TTNN,tipo                                 05d10h20m:TA03,2
+ *
+ * v03: el archivo de averías programadas (escenarios de 5 días y colapso) lo define el equipo, porque el curso
+ * aún no publica su formato ("se tendrán reglas de generación", P&R pregunta 3). Sigue la idea de ventas: un
+ * archivo por mes y el instante dentro del mes, la unidad en formato TTNN y el tipo de avería (1, 2 o 3).
+ * El tipo también se acepta como T2, TI2 o TIPO2.
  *
  * v02: se aceptan las letras d/h/m en minúscula o mayúscula y la "m" final es opcional, de modo que
  * también se leen los archivos sintéticos antiguos (01D01H052). La v01 solo aceptaba el formato
@@ -31,6 +37,8 @@ public final class Formato {
             Pattern.compile("^\\s*" + INSTANTE + ":([^,]+),([^,]+),([^,]+),(\\d+),(\\d+)\\s*$");
     private static final Pattern BLOQUEO =
             Pattern.compile("^\\s*" + INSTANTE + "-" + INSTANTE + ":(.+)$");
+    private static final Pattern AVERIA = Pattern.compile(
+            "^\\s*" + INSTANTE + "\\s*:\\s*([A-Za-z]{2}\\d{2,})\\s*,\\s*(?:[Tt](?:[Ii](?:[Pp][Oo])?)?)?\\s*([123])\\s*$");
     private static final MapaReticula INDICES = new MapaReticula(70, 50);
 
     private Formato() {
@@ -42,6 +50,11 @@ public final class Formato {
 
     public static String archivoBloqueos(YearMonth m) {
         return String.format("bloqueo.%02d%02d.txt", m.getYear() % 100, m.getMonthValue());
+    }
+
+    /** v03: averías programadas del mes. */
+    public static String archivoAverias(YearMonth m) {
+        return String.format("averias.%04d%02d.txt", m.getYear(), m.getMonthValue());
     }
 
     private static LocalDateTime instante(YearMonth m, String dia, String hora, String minuto) {
@@ -72,5 +85,16 @@ public final class Formato {
         for (int n : LectorBloqueos.nodosDePoligonal(puntos, INDICES)) nodos.add(new Nodo(INDICES.x(n), INDICES.y(n)));
         return new Bloqueo(instante(m, x.group(1), x.group(2), x.group(3)),
                 instante(m, x.group(4), x.group(5), x.group(6)), vertices, nodos);
+    }
+
+    /** v03: avería programada: instante, código de la unidad (TTNN) y tipo de avería (1, 2 o 3). */
+    public record LineaAveria(LocalDateTime instante, String unidad, int tipo) {
+    }
+
+    public static LineaAveria averia(YearMonth m, String linea) {
+        Matcher x = AVERIA.matcher(linea);
+        if (!x.matches()) throw new IllegalArgumentException("Registro de avería inválido: " + linea);
+        return new LineaAveria(instante(m, x.group(1), x.group(2), x.group(3)), x.group(4).toUpperCase(),
+                Integer.parseInt(x.group(5)));
     }
 }
