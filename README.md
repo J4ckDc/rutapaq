@@ -1,4 +1,4 @@
-# RUTAPAQ v03: servidor, simulación y visualizador con rutapaq-planner (ALNS y GA)
+# RUTAPAQ v04: servidor, simulación y visualizador con rutapaq-planner (ALNS y GA)
 
 Un solo proceso Java 17 **sin dependencias en ejecución**. Contiene el código de
 **rutapaq-planner v2.0** (`pe.pucp.paqrap.planner`: ALNS_PAQRAP, HGS_PAQRAP, EvaluadorItinerario y
@@ -7,7 +7,33 @@ el banco del IEN) y, alrededor de él, la simulación y el visualizador web (`pe
 Alcance de la v03: sobre la **simulación de 5 días** de la v02 se agregan las **averías** de las unidades
 (tipos 1, 2 y 3), con registro desde el visualizador, averías programadas por archivo, trasvase de paquetes,
 traslado al almacén central y replanificación inmediata. El servidor ya aplica las averías en los tres
-escenarios; la operación día a día y la simulación hasta el colapso siguen pendientes en la interfaz.
+escenarios.
+
+Alcance de la v04: la **simulación hasta el colapso** en el visualizador. La operación día a día sigue pendiente
+en la interfaz.
+
+## Cambios de la v04 respecto de la v03: simulación hasta el colapso
+
+Es la misma pantalla del Simulador de Rutas: en la barra superior se elige **Colapso** en lugar de **5 Días**
+(documento de GUI, sección 4.3 y tabla 5).
+
+| # | Cambio | Dónde |
+|---|---|---|
+| 1 | Selector **5 Días / Colapso** de la barra superior habilitado; **Iniciar** arranca el modo elegido. El selector sigue a la simulación en curso cuando aparece una nueva (iniciada en este u otro dispositivo). | `resources/web/` |
+| 2 | En modo Colapso la tarjeta de la línea de tiempo D1–D5 desaparece (no hay duración definida); el reloj simulado y el tiempo real se mantienen. Pausar, reanudar y registrar averías funcionan igual que en los 5 días. | `resources/web/` |
+| 3 | **Colapso**: cuando un pedido llega a su límite sin ser entregado (criterio P) o cuando una ejecución del planificador tarda `ien.saSegundos` o más (criterio C), la simulación se detiene. Se guarda el **reporte del colapso** tal como estaba en ese instante: criterio, fecha y hora simulada, Tc, pedido involucrado (cliente, ubicación, cantidad y entregado, plazo, registro, límite y unidad que lo llevaba) y estado de la flota (en ruta, disponibles, en mantenimiento y averiadas por tipo). | `Simulacion.colapso()`, campos `colapso` y `tipoFin` del estado |
+| 4 | Al colapsar, la etiqueta de estado muestra **Colapso** en rojo, aparece una **alerta roja que no se cierra sola** (con *Ver reporte*), se abre el reporte con los indicadores acumulados y el mapa queda centrado en el pedido involucrado. | `resources/web/` |
+| 5 | **Fin sin colapso**: si se acaban los datos de ventas de la carpeta y ya se entregó todo lo pendiente, termina con "Sin colapso…" y el resumen de indicadores. Si un pedido vence antes, eso ya es colapso. | `Simulacion.paso()`, `FuenteDatos.finDeVentas()` |
+| 6 | Las averías programadas del archivo (`averias.aaaamm.txt`, de prueba, generadas por el equipo) **no se usan en el colapso**; se vuelven a activar con `averia.archivo.colapso=true`. En los 5 días siguen como antes. Las averías registradas desde el visualizador funcionan en ambos. | `Simulacion`, `config.properties` |
+| 7 | 3 pruebas nuevas: reporte del colapso con el pedido y la flota, fin sin colapso al acabarse los datos, y averías del archivo solo en el colapso si se configura. | `src/test/java/.../app/sim/ColapsoTest.java` |
+
+Velocidad: `escenario.colapso.factor` (600 por defecto: 1 día simulado dura unos 2,4 minutos reales); se fija antes
+de iniciar y no se cambia desde la pantalla. El instante del colapso (Tc) puede variar entre corridas con los
+mismos datos, porque el ALNS se corta por tiempo (ver *Reproducibilidad* en la v03).
+
+Verificación: las 39 pruebas pasan. Recorrido en el navegador: colapso desde el 01/03/2027 (reporte, alerta fija y
+mapa centrado en el pedido), simulación de 5 días con su resumen como antes, y fin sin colapso con datos solo de
+enero de 2026.
 
 ## Cambios de la v03 respecto de la v02: averías
 
@@ -27,6 +53,26 @@ escenarios; la operación día a día y la simulación hasta el colapso siguen p
 Verificación: las 32 pruebas pasan (las 15 del planificador sin cambios y las 17 nuevas). Sin averías, la v03 da los
 mismos resultados que la v02 con los mismos datos y semilla (5 días desde el 01/01/2026: 76 pedidos recibidos,
 74 entregados, S/ 10 184).
+
+### Correcciones de la v03
+
+| # | Corrección | Dónde |
+|---|---|---|
+| 1 | **Un pedido vencido se sigue entregando.** Con plazos duros, el ALNS nunca asignaba un pedido que ya no podía llegar a tiempo, y quedaba pendiente para siempre (el que vencía en camino sí se entregaba). Ahora se replanifica como un pedido registrado en ese instante con plazo de 36 h, la prioridad más baja: llega aunque sea tarde, sin quitarle el lugar a los pedidos que aún pueden llegar a tiempo. Ninguna ruta pasa de `planificador.horizonteRutaHoras` (8 h), así que sale en las siguientes rutas con espacio. Sigue contando como vencido en los indicadores. En el escenario de colapso no cambia nada: la simulación termina cuando vence el primero. | `Simulacion.pedidoParaPlanificar()` |
+| 2 | **Un pedido que no se pudo asignar se reparte entre unidades más pequeñas.** Los pedidos se parten en lotes de `ien.maximoProductosPorEntrega` (24), así que uno de 9 o 10 productos solo lo podía llevar un auto: sin autos libres no se atendía, aunque la P&R permite entregas parciales (pregunta 13). Ahora, si en un ciclo el planificador no logra asignarlo, en el siguiente se parte según la capacidad de la moto (10 = 8 + 2), tomada de la flota configurada. Un pedido que cabe en un auto libre se sigue planificando entero, porque cada entrega parcial suma 1 h. No se parte hasta la capacidad de la bicicleta: en una prueba de estrés (los 10 autos averiados 72 h con los pedidos de octubre de 2026) partir solo hasta 8 dio 99,3-99,5 % a tiempo; seguir hasta 4 dio 98,4-99,2 %, y no partir, 85 %. | `Simulacion.tamanosDeLote()`, `Pedido.particion` |
+| 3 | **El reloj simulado avanza según el tiempo real transcurrido.** Antes avanzaba 100 ms fijos por vuelta y no contaba lo que tardaba el planificador, así que la simulación de 5 días duraba más que `escenario.semanal.minutosReales` y la operación día a día se atrasaba respecto del reloj. Se simula como máximo 5 s reales por vuelta, para no saltar horas si la PC se suspende. | `Simulacion.run()` |
+| 4 | 4 pruebas nuevas: un pedido vencido se entrega (y en colapso termina la simulación), un pedido de 10 sin autos se reparte y llega a tiempo, un pedido que cabe en un auto no se parte, y el reloj incluye el tiempo en que la simulación estuvo ocupada. | `src/test/java/.../app/sim/CorreccionesTest.java` |
+
+Verificación de las correcciones: las 36 pruebas pasan, y las 3 que prueban los errores corregidos fallan con el
+código anterior. Cuando no hay pedidos vencidos ni sin asignar, el resultado no cambia: 5 días desde el 01/01/2026
+sin averías dan, como antes, 76 pedidos recibidos, 74 entregados y S/ 10 184.
+
+**Reproducibilidad.** El ALNS se detiene a las `alns.iteracionesSinMejora` iteraciones sin mejora o al agotar
+`planificador.presupuestoSegundos` (P = 2 s), lo que ocurra primero. Con poca carga (como enero de 2026) converge
+antes de los 2 s y, con los mismos datos y semilla, se obtienen exactamente los mismos resultados. Con carga alta lo
+corta el tiempo, y cuántas iteraciones alcanza depende de la máquina y de lo que esté corriendo en ella: con la misma
+semilla, los resultados pueden variar ligeramente entre corridas. Por eso, al comparar resultados conviene usar
+varias corridas.
 
 ## Cambios de la v02 respecto de la v01
 
@@ -60,6 +106,8 @@ java -jar rutapaq.jar             # http://localhost:8080
 En el navegador: elegir la fecha y hora de inicio (hay datos de enero 2026 a diciembre 2028) y
 **Iniciar**. **Detener** pausa la simulación y **Reanudar** la continúa; **Iniciar** de nuevo descarta la
 actual y empieza otra. Los 5 días duran `escenario.semanal.minutosReales` minutos reales (30 por defecto).
+Con **Colapso** elegido en la barra superior, la simulación sigue hasta el colapso (o hasta que se acaben los datos)
+a `escenario.colapso.factor` segundos simulados por segundo real (600 por defecto).
 
 Sin interfaz (corre lo más rápido posible e imprime indicadores cada 12 h):
 
@@ -89,7 +137,9 @@ el `SimuladorColapso` del IEN, pero sobre el estado en vivo:
 2. Arma la `InstanciaPlanificacion`: un `Vehiculo` por unidad (nodo, hora y carga con que queda libre,
    turno vigente y si ya tomó refrigerio), los `Almacen` con su saldo descontando las recargas
    comprometidas, los `Pedido` con lo que falta asignar (fraccionados con `LectorVentas.fraccionar`
-   en partes de `ien.maximoProductosPorEntrega`) y la `MapaReticula` con los bloqueos vigentes.
+   en partes de `ien.maximoProductosPorEntrega`, o de la capacidad de la moto si en un ciclo anterior no se
+   lograron asignar; los ya vencidos, con plazo de 36 h desde ese instante) y la `MapaReticula`
+   con los bloqueos vigentes.
 3. Llama a `Planificador.planificar()` del algoritmo elegido (`planificador.algoritmo=ALNS` o `GA`).
 4. Convierte el `PlanDistribucion` en el itinerario de cada unidad: entregas, recargas y refrigerios
    tal como los colocó el `EvaluadorItinerario`.
@@ -99,8 +149,8 @@ atraviesa bloqueos) y ejecutan su itinerario. Se aplican las mismas reglas que e
 cumple con la hora de llegada, cada entrega toma 1 h, el refrigerio dura 1 h, las recargas no toman
 tiempo y los intermedios vuelven a 1 000 unidades a las 23:59:59.
 
-Colapso (escenario hasta el colapso, aún no habilitado en la interfaz): **P** cuando un pedido llega a su
-límite sin entrega; **C** cuando una ejecución del planificador tarda `ien.saSegundos` o más.
+Colapso (escenario hasta el colapso, v04): **P** cuando un pedido llega a su límite sin entrega; **C** cuando una
+ejecución del planificador tarda `ien.saSegundos` o más. Sin colapso, termina al acabarse los datos de ventas.
 
 Mantenimiento preventivo (`datos/mant.preventivo.*`): una unidad deja de recibir rutas cuando su
 mantenimiento empieza antes de que termine el horizonte de ruta (`planificador.horizonteRutaHoras`, 8 h),
@@ -148,7 +198,7 @@ averías programadas: `averia.archivo.habilitado=false`.
 | Archivo | Qué contiene |
 |---|---|
 | `planner.properties` (de rutapaq-planner, sin cambios) | Mapa, almacenes, flota, Sc, Sa, P, parámetros de ALNS y GA |
-| `config.properties` | Servidor, algoritmo, escenarios (fecha y hora propuestas, duración del 5D), averías (`averia.tipo1.horas`, `averia.enLugar.horas`, `averia.tipo3.diasMinimos`, `averia.tipo3.horaRetorno`, `averia.trasvase.*`, `averia.archivo.habilitado`), frecuencia de publicación y semáforo (`semaforo.plazo.*`, `semaforo.almacen.*`, `semaforo.carga.*`, `semaforo.pedido.*`) |
+| `config.properties` | Servidor, algoritmo, escenarios (fecha y hora propuestas, duración del 5D), averías (`averia.tipo1.horas`, `averia.enLugar.horas`, `averia.tipo3.diasMinimos`, `averia.tipo3.horaRetorno`, `averia.trasvase.*`, `averia.archivo.habilitado`, `averia.archivo.colapso`), frecuencia de publicación y semáforo (`semaforo.plazo.*`, `semaforo.almacen.*`, `semaforo.carga.*`, `semaforo.pedido.*`) |
 
 Un `config.properties` junto al jar sobrescribe cualquier clave de los dos archivos, sin recompilar.
 

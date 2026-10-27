@@ -28,6 +28,27 @@ public final class FuenteDatos implements AutoCloseable {
                 : null;
     }
 
+    /**
+     * v04: instante en que se acaban los datos de ventas de la carpeta (inicio del mes siguiente al último archivo
+     * ventas.aaaamm.txt); null si la carpeta no tiene ninguno. Lo usa la simulación hasta el colapso para terminar
+     * cuando ya no llegan más pedidos.
+     */
+    public static LocalDateTime finDeVentas(Path carpeta) {
+        YearMonth ultimo = null;
+        try (java.nio.file.DirectoryStream<Path> ds = java.nio.file.Files.newDirectoryStream(carpeta, "ventas.*.txt")) {
+            for (Path p : ds) {
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile("ventas\\.(\\d{4})(\\d{2})\\.txt")
+                        .matcher(p.getFileName().toString());
+                if (!m.matches()) continue;
+                YearMonth ym = YearMonth.of(Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)));
+                if (ultimo == null || ym.isAfter(ultimo)) ultimo = ym;
+            }
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+        return ultimo == null ? null : ultimo.plusMonths(1).atDay(1).atStartOfDay();
+    }
+
     public List<Formato.LineaPedido> pedidosHasta(LocalDateTime t) throws IOException {
         return pedidos.leerHasta(t);
     }

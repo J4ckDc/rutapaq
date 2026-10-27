@@ -44,7 +44,7 @@
       <button class="icono-btn" id="plegarMenu" aria-label="Plegar menú" title="Plegar menú">
         <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
       </button>
-      <span class="version">v0.3 · 5 días</span>
+      <span class="version">v0.4</span>
     </div>
   </aside>
 
@@ -57,7 +57,7 @@
       </label>
       <div class="segmentado" role="group" aria-label="Modo de simulación">
         <button class="seg activo" id="modo5d" aria-pressed="true">5 Días</button>
-        <button class="seg" id="modoColapso" disabled title="La simulación hasta el colapso llega en la siguiente versión">Colapso</button>
+        <button class="seg" id="modoColapso" aria-pressed="false" title="Simulación hasta el colapso: continúa hasta que un pedido no se entregue a tiempo">Colapso</button>
       </div>
       <div class="controles">
         <button class="btn primario" id="btnIniciar">
@@ -111,7 +111,7 @@
         <ul class="almacenes" id="listaAlmacenes"></ul>
         <div class="leyenda-mini"><span class="nota">Consumido</span><span><i class="p VERDE"></i>&lt;70%</span><span><i class="p AMBAR"></i>70–90%</span><span><i class="p ROJO"></i>&gt;90%</span></div>
       </div>
-      <div class="bloque">
+      <div class="bloque" id="bloqueLinea">
         <h3>Línea de tiempo · 5 días</h3>
         <div class="linea-tiempo" id="lineaTiempo">
           <div class="pista"><div class="avance" id="ltAvance"></div><div class="punto" id="ltPunto"></div></div>
@@ -206,10 +206,11 @@
   </main>
 </div>
 
-<!-- resumen al terminar los 5 días -->
+<!-- resumen al terminar los 5 días; v04: también el reporte del colapso y el fin sin colapso -->
 <dialog class="modal" id="modalFin" aria-labelledby="finTitulo">
   <h2 id="finTitulo">Simulación de 5 días terminada</h2>
   <p id="finPeriodo" class="nota"></p>
+  <div id="finColapso" hidden></div>
   <div class="fin-grid" id="finGrid"></div>
   <div class="modal-acciones">
     <button class="btn" id="finCerrar">Ver el mapa</button>

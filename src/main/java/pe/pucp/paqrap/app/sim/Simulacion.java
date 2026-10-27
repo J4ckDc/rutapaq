@@ -66,6 +66,19 @@ import java.util.Set;
  *     pasan de forma instantánea al almacén central con lo no trasvasado y vuelven a operar al final del turno
  *     siguiente (tipo 2) o tras al menos 2 días, en el turno de 15:00 (tipo 3).
  *   - Las averías no bloquean la calle: las demás unidades siguen circulando por ahí (P&R pregunta 7).
+ *
+ * Correcciones v03:
+ *   - Un pedido vencido se sigue planificando hasta entregarlo, con la prioridad más baja (pedidoParaPlanificar).
+ *     Antes, con plazos duros, un pedido que ya no podía llegar a tiempo no se asignaba nunca.
+ *   - Un pedido que el planificador no logra asignar se parte en el ciclo siguiente según la capacidad de la moto
+ *     (tamanosDeLote), para que lo lleven varias unidades si no hay un auto libre.
+ *   - El reloj simulado avanza según el tiempo real transcurrido (run), no 100 ms fijos por vuelta.
+ *
+ * Cambios v04 (simulación hasta el colapso en el visualizador):
+ *   - Al colapsar se guarda el reporte del colapso (colapsoJson): criterio, fecha y hora, Tc, pedido involucrado y
+ *     estado de la flota en ese instante; el estado publicado indica además cómo terminó (tipoFin).
+ *   - Si se acaban los datos de ventas y ya se entregó todo, termina "sin colapso" (SIN_COLAPSO).
+ *   - Las averías programadas del archivo no se usan en el colapso, salvo averia.archivo.colapso=true.
  */
 public final class Simulacion implements Runnable {
 
@@ -75,6 +88,10 @@ public final class Simulacion implements Runnable {
 
     private static final double PASO_MAX_SEG = 30.0;      // granularidad del movimiento
     private static final long TICK_MS = 100;              // cada cuánto avanza el reloj real
+    /** v03: tope de tiempo real que se simula en una vuelta (si la PC se suspende, no salta horas de golpe). */
+    private static final long MAX_VUELTA_NS = 5_000_000_000L;
+    /** v03: plazo con que se replanifica un pedido vencido: el mayor del caso, que tiene la prioridad más baja. */
+    private static final int PLAZO_VENCIDO_HORAS = 36;
     private static final double ENTREGA_SEG = 3600.0;     // acondicionamiento de la entrega
     private static final double REFRIGERIO_SEG = 3600.0;
     /** v03: identificador del depósito temporal de una unidad averiada (p. ej. TRV-TA03). */
@@ -114,7 +131,13 @@ public final class Simulacion implements Runnable {
     private volatile boolean cancelada;    // al iniciar otra simulación, esta termina
     private long nsReales;                 // tiempo real en ejecución, sin contar pausas
     private String motivoFin = "";
+    /** v04: cómo terminó: FIN_PERIODO (5 días), COLAPSO, SIN_COLAPSO, ERROR o REEMPLAZADA ("" si sigue). */
+    private String tipoFin = "";
     private double tcHoras = -1;
+    /** v04: reporte del colapso tal como estaba en ese instante (JSON); null si no hubo colapso. */
+    private String colapsoJson;
+    /** v04: fin de los datos de ventas de la carpeta (null si no hay archivos): sin colapso hasta allí, termina. */
+    private final LocalDateTime finDatos;
 
     private int contador, recibidos, completados, enPlazo, vencidos, ciclos, sinPlanificar, iteraciones;
     private int contadorAverias, averiasOmitidas, trasvasados, devueltos;   // v03
@@ -131,8 +154,15 @@ public final class Simulacion implements Runnable {
         this.reglas = new ReglasAveria(cfg);
         // v03: las averías programadas del archivo se usan en la simulación de 5 días y en la de colapso;
         // en la operación día a día se registran desde el visualizador.
-        this.fuente = new FuenteDatos(Path.of(cfg.texto("datos.carpeta", "datos")), inicio,
-                reglas.archivoHabilitado && escenario != Escenario.DIA_A_DIA);
+        // v04: en la simulación hasta el colapso, las averías del archivo solo se usan si averia.archivo.colapso=true
+        //     (por defecto no: los archivos actuales son de prueba, generados por el equipo, no datos del curso).
+        boolean averiasArchivo = reglas.archivoHabilitado && switch (escenario) {
+            case SEMANAL -> true;
+            case COLAPSO -> Boolean.parseBoolean(cfg.texto("averia.archivo.colapso", "false"));
+            case DIA_A_DIA -> false;
+        };
+        this.fuente = new FuenteDatos(Path.of(cfg.texto("datos.carpeta", "datos")), inicio, averiasArchivo);
+        this.finDatos = FuenteDatos.finDeVentas(Path.of(cfg.texto("datos.carpeta", "datos")));
         this.mantenimiento = new PlanMantenimiento(Path.of(cfg.texto("datos.carpeta", "datos")));
         this.mapa = new MapaReticula(cfg.entero("ien.mapaAnchoKm", 70), cfg.entero("ien.mapaAltoKm", 50));
         this.caminos = new Caminos(mapa);
@@ -218,24 +248,27 @@ public final class Simulacion implements Runnable {
             while (!cancelada && estado != Estado.TERMINADA) {
                 Thread.sleep(TICK_MS);
                 long ahoraNs = System.nanoTime();
+                // v03: se simula el tiempo real que pasó de verdad desde la vuelta anterior (incluye lo que tardó
+                // el planificador), no 100 ms fijos. Antes la simulación se atrasaba respecto del reloj real.
+                long transcurrido = Math.min(ahoraNs - ultimo, MAX_VUELTA_NS);
+                ultimo = ahoraNs;
                 synchronized (this) {
                     if (estado == Estado.EJECUTANDO) {      // en pausa el reloj simulado no avanza
-                        nsReales += ahoraNs - ultimo;
-                        avanzar(factor * TICK_MS / 1000.0);
+                        nsReales += transcurrido;
+                        avanzar(factor * transcurrido / 1e9);
                     }
                 }
-                ultimo = ahoraNs;
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (Exception e) {
             synchronized (this) {
                 ultimoError = e.toString();
-                terminar("Error: " + e.getMessage());
+                terminar("Error: " + e.getMessage(), "ERROR");
             }
         } finally {
             synchronized (this) {
-                if (estado != Estado.TERMINADA) terminar("Reemplazada por una nueva simulación");
+                if (estado != Estado.TERMINADA) terminar("Reemplazada por una nueva simulación", "REEMPLAZADA");
             }
             try {
                 fuente.close();
@@ -255,15 +288,70 @@ public final class Simulacion implements Runnable {
         }
     }
 
-    private void terminar(String motivo) {
+    private void terminar(String motivo, String tipo) {
         if (estado == Estado.TERMINADA) return;
         estado = Estado.TERMINADA;
         motivoFin = motivo;
+        tipoFin = tipo;
     }
 
-    private void colapso(String criterio, String detalle) {
+    /**
+     * Colapso logístico: la simulación se detiene. v04: se guarda el reporte del colapso tal como estaba en ese
+     * instante (criterio, fecha y hora simulada, Tc, pedido involucrado y estado de la flota), que el visualizador
+     * muestra al terminar. pedido es null en el criterio C (Ta >= Sa), que no depende de un pedido.
+     */
+    private void colapso(String criterio, String detalle, Pedido pedido) {
         tcHoras = t / 3600.0;
-        terminar(String.format("Colapso %s: %s (Tc = %.1f h)", criterio, detalle, tcHoras));
+        int[] f = contarFlota();
+        StringBuilder b = new StringBuilder(1024);
+        b.append("{\"criterio\":").append(Json.str(criterio))
+                .append(",\"descripcion\":").append(Json.str(criterio.equals("P")
+                        ? "Un pedido llegó a su límite sin ser entregado"
+                        : "El planificador tardó Sa o más en una ejecución (Ta >= Sa)"))
+                .append(",\"detalle\":").append(Json.str(detalle))
+                .append(",\"hora\":").append(hora(t))
+                .append(",\"tc\":").append(Json.num(tcHoras))
+                .append(",\"pedido\":");
+        if (pedido == null) b.append("null");
+        else {
+            Set<String> llevan = new LinkedHashSet<>();
+            for (Unidad u : unidades) {
+                for (Parada x : u.paradas) if (x.tipo() == Parada.Tipo.ENTREGA && pedido.id.equals(x.pedidoId())) llevan.add(u.id);
+            }
+            b.append("{\"id\":").append(Json.str(pedido.id))
+                    .append(",\"cliente\":").append(Json.str(pedido.cliente))
+                    .append(",\"x\":").append(pedido.nodo.x()).append(",\"y\":").append(pedido.nodo.y())
+                    .append(",\"cantidad\":").append(pedido.cantidad)
+                    .append(",\"entregado\":").append(pedido.entregado)
+                    .append(",\"plazo\":").append(pedido.plazoHoras)
+                    .append(",\"registro\":").append(hora(pedido.registro))
+                    .append(",\"limite\":").append(hora(pedido.limite()))
+                    .append(",\"unidades\":");
+            lista(b, llevan);
+            b.append('}');
+        }
+        b.append(",\"flota\":{\"total\":").append(unidades.size())
+                .append(",\"enRuta\":").append(f[0]).append(",\"disponibles\":").append(f[1])
+                .append(",\"mantenimiento\":").append(f[2]).append(",\"averiadas\":").append(f[3])
+                .append(",\"averiadasTipo1\":").append(f[4]).append(",\"averiadasTipo2\":").append(f[5])
+                .append(",\"averiadasTipo3\":").append(f[6]).append("}}");
+        colapsoJson = b.toString();
+        terminar(String.format("Colapso %s: %s (Tc = %.1f h)", criterio, detalle, tcHoras), "COLAPSO");
+    }
+
+    /** Unidades en ruta (incluye entregando, refrigerio y trasvase), disponibles, en mantenimiento y averiadas (total y por tipo). */
+    private int[] contarFlota() {
+        int[] f = new int[7];
+        for (Unidad u : unidades) {
+            String e = estadoUnidad(u);
+            if (e.equals("AVERIADA")) {
+                f[3]++;
+                f[3 + u.averia.tipo]++;
+            } else if (e.equals("MANTENIMIENTO")) f[2]++;
+            else if (e.equals("DISPONIBLE")) f[1]++;
+            else f[0]++;
+        }
+        return f;
     }
 
     // ------------------------------------------------------------------ un paso de tiempo
@@ -331,7 +419,7 @@ public final class Simulacion implements Runnable {
                 p.vencido = true;
                 vencidos++;
                 if (escenario == Escenario.COLAPSO) {
-                    colapso("P", "el pedido " + p.id + " venció sin entrega");
+                    colapso("P", "el pedido " + p.id + " venció sin entrega", p);
                     return;
                 }
             }
@@ -339,7 +427,19 @@ public final class Simulacion implements Runnable {
         pedidos.values().removeIf(p -> p.completo() && p.asignado <= 0 && t > p.liberado);
 
         // 7. fin de la simulación de 5 días
-        if (t >= duracionSeg) terminar("Fin de la simulación de 5 días");
+        if (t >= duracionSeg) terminar("Fin de la simulación de 5 días", "FIN_PERIODO");
+
+        // 8. v04: hasta el colapso, sin colapso: se acabaron los datos de ventas y ya se entregó todo lo pendiente
+        //    (si un pedido vence antes, eso ya es colapso y la simulación terminó en el paso 6)
+        if (escenario == Escenario.COLAPSO && finDatos != null && !ahora.isBefore(finDatos)) {
+            boolean todoEntregado = true;
+            for (Pedido p : pedidos.values()) if (!p.completo()) todoEntregado = false;
+            if (todoEntregado) {
+                terminar("Sin colapso: se entregaron todos los pedidos hasta el fin de los datos ("
+                        + finDatos.minusMinutes(1).toLocalDate().format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy"))
+                        + ")", "SIN_COLAPSO");
+            }
+        }
     }
 
     /**
@@ -602,14 +702,15 @@ public final class Simulacion implements Runnable {
         }
 
         // d) cartera: todo lo que falta asignar, fraccionado como en el IEN (entregas parciales)
+        //    v03: un pedido vencido se sigue planificando (debe llegar aunque sea tarde), con la prioridad más baja;
+        //    un pedido que no se logró asignar en el ciclo anterior se parte en lotes más pequeños (particion).
         Map<String, String> original = new HashMap<>();
         List<pe.pucp.paqrap.planner.model.Pedido> cartera = new ArrayList<>();
+        int[] lotes = tamanosDeLote();
         for (Pedido p : pedidos.values()) {
             if (p.porAsignar() <= 0) continue;
-            pe.pucp.paqrap.planner.model.Pedido x = new pe.pucp.paqrap.planner.model.Pedido(p.id, p.cliente,
-                    caminos.indice(p.nodo), p.nodo.x(), p.nodo.y(), p.porAsignar(),
-                    instante(p.registro - margenSeg), p.plazoHoras, null);
-            for (pe.pucp.paqrap.planner.model.Pedido parte : LectorVentas.fraccionar(x, maximoPorEntrega)) {
+            for (pe.pucp.paqrap.planner.model.Pedido parte : LectorVentas.fraccionar(pedidoParaPlanificar(p),
+                    lotes[Math.min(p.particion, lotes.length - 1)])) {
                 cartera.add(parte);
                 original.put(parte.getId(), p.id);
             }
@@ -634,8 +735,15 @@ public final class Simulacion implements Runnable {
         ultimoError = "";                                    // v02: el planificador volvió a funcionar
         iteraciones = planificador.iteracionesEjecutadas();
         sinPlanificar = plan.getNoPlanificados().size();
+        // v03: lo que no se pudo asignar se parte en lotes más pequeños en el ciclo siguiente (una vez por ciclo)
+        Set<String> noAsignados = new LinkedHashSet<>();
+        for (pe.pucp.paqrap.planner.model.Pedido x : plan.getNoPlanificados()) noAsignados.add(original.get(x.getId()));
+        for (String id : noAsignados) {
+            Pedido p = pedidos.get(id);
+            if (p != null && p.particion < lotes.length - 1) p.particion++;
+        }
         if (escenario == Escenario.COLAPSO && msUltimoPlan >= saMs) {
-            colapso("C", "el planificador tardó " + msUltimoPlan + " ms (Ta >= Sa)");
+            colapso("C", "el planificador tardó " + msUltimoPlan + " ms (Ta >= Sa)", null);
             return;
         }
 
@@ -669,6 +777,40 @@ public final class Simulacion implements Runnable {
             }
             if (refrigerio) u.paradas.addLast(Parada.refrigerio(ultimo));
         }
+    }
+
+    /**
+     * v03: el pedido tal como lo recibe el planificador. Si ya venció, el plazo original ya no se puede cumplir y,
+     * con plazos duros, el ALNS no lo asignaría nunca; pero el producto debe llegar aunque sea tarde. Por eso se le
+     * entrega como un pedido nuevo registrado ahora con el plazo de PLAZO_VENCIDO_HORAS (36 h): prioridad REGULAR,
+     * la más baja, para que no le quite el lugar a los pedidos que aún pueden llegar a tiempo. No queda relegado: el
+     * planificador castiga mucho dejar un pedido sin planificar y ninguna ruta pasa de planificador.horizonteRutaHoras,
+     * así que sale en las siguientes rutas con espacio. Los indicadores lo siguen contando como vencido (Pedido.limite
+     * no cambia) y en el escenario de colapso no aplica: la simulación ya terminó cuando venció el primero.
+     */
+    private pe.pucp.paqrap.planner.model.Pedido pedidoParaPlanificar(Pedido p) {
+        boolean vencido = t > p.limite();
+        return new pe.pucp.paqrap.planner.model.Pedido(p.id, p.cliente, caminos.indice(p.nodo), p.nodo.x(), p.nodo.y(),
+                p.porAsignar(), vencido ? instante(t) : instante(p.registro - margenSeg),
+                vencido ? PLAZO_VENCIDO_HORAS : p.plazoHoras, null);
+    }
+
+    /**
+     * v03: tamaños de lote para partir un pedido: ien.maximoProductosPorEntrega y la mayor capacidad de la flota que
+     * sea menor que ese máximo (24 y 8, la de la moto, con la flota del caso). Un pedido que cabe en un auto se
+     * planifica entero; si el planificador no logra asignarlo, en el ciclo siguiente se parte según la capacidad de la
+     * moto (10 = 8 + 2) y ya no más. No se baja a la capacidad de la bicicleta: en la prueba de estrés (los 10 autos
+     * averiados 72 h con los pedidos de octubre de 2026) partir hasta 4 dejó 98,4-99,2 % a tiempo frente a 99,3-99,5 %
+     * partiendo solo hasta 8, porque cuando la flota está saturada un pedido también queda sin asignar por falta de
+     * unidades libres, no por su tamaño, y cada entrega parcial suma 1 h de acondicionamiento.
+     */
+    private int[] tamanosDeLote() {
+        int menor = 0;
+        for (Unidad u : unidades) {
+            int c = u.tipo.capacidad;
+            if (c > menor && c < maximoPorEntrega) menor = c;
+        }
+        return menor > 0 ? new int[]{maximoPorEntrega, menor} : new int[]{maximoPorEntrega};
     }
 
     /**
@@ -972,22 +1114,16 @@ public final class Simulacion implements Runnable {
                 .append(",\"iteraciones\":").append(iteraciones)
                 .append(",\"sinPlanificar\":").append(sinPlanificar)
                 .append(",\"motivoFin\":").append(Json.str(motivoFin))
+                .append(",\"tipoFin\":").append(Json.str(tipoFin))
                 .append(",\"tc\":").append(tcHoras < 0 ? "null" : Json.num(tcHoras))
+                .append(",\"colapso\":").append(colapsoJson == null ? "null" : colapsoJson)
                 .append(",\"lineasConError\":").append(fuente.lineasConError() + mantenimiento.errores())
                 .append(",\"error\":").append(Json.str(ultimoError));
 
         // ---- resumen de indicadores (con su nivel de semáforo)
-        int enRuta = 0, disponibles = 0, enMant = 0, averiadas = 0;
-        int[] porTipo = new int[4];
-        for (Unidad u : unidades) {
-            String e = estadoUnidad(u);
-            if (e.equals("AVERIADA")) {
-                averiadas++;
-                porTipo[u.averia.tipo]++;
-            } else if (e.equals("MANTENIMIENTO")) enMant++;
-            else if (e.equals("DISPONIBLE")) disponibles++;
-            else enRuta++;
-        }
+        int[] fl = contarFlota();
+        int enRuta = fl[0], disponibles = fl[1], enMant = fl[2], averiadas = fl[3];
+        int[] porTipo = {0, fl[4], fl[5], fl[6]};
         int pendientes = 0;
         for (Pedido p : pedidos.values()) if (!p.completo()) pendientes++;
         double pct = pctATiempo();

@@ -1,4 +1,4 @@
-// RUTAPAQ v03 – visualizador del Simulador de rutas (escenario de 5 días) con averías de las unidades.
+// RUTAPAQ v04 – visualizador del Simulador de rutas: simulación de 5 días y hasta el colapso, con averías de las unidades.
 // Recibe el estado completo por SSE (/api/stream) cada ~500 ms y lo dibuja en un canvas.
 // Toda la lógica (simulación, planificación, semáforo) está en el servidor: aquí solo se dibuja.
 // Entre una foto y la siguiente, las unidades se interpolan siguiendo su camino por las calles,
@@ -23,6 +23,11 @@
   let errorMostrado = '';
   let lineasAvisadas = '';
   const anim = new Map();       // id de unidad -> animación entre dos fotos
+  // v04: modo elegido en la barra superior (SEMANAL = "5 Días" o COLAPSO). Sigue a la simulación en curso cuando
+  // aparece una nueva (iniciada aquí o en otro dispositivo); el usuario lo cambia para la próxima que inicie.
+  let modo = 'SEMANAL';
+  let escenarioVisto = '';
+  let alertaColapso = null;     // alerta roja del colapso: no se cierra sola
   const vista = { zoom: 1, ox: 0, oy: 0 };
 
   // ================================================================ utilidades
@@ -51,7 +56,9 @@
   const vaATrasvasar = (u) => u.estado === 'EN_RUTA' && u.paradas.length > 0
     && u.paradas[0].tipo === 'RECARGA' && esTrasvase(u.paradas[0].ref);
   const pedidosReplanificados = (n) => n === 1 ? 'su pedido se replanifica' : `sus ${n} pedidos se replanifican`;
-  const ESTADOS_SIM = { SIN_SIMULACION: 'Sin simulación', PREPARADA: 'Preparando', EJECUTANDO: 'Simulando', PAUSADA: 'Detenido', TERMINADA: 'Finalizado' };
+  const ESTADOS_SIM = { SIN_SIMULACION: 'Sin simulación', PREPARADA: 'Preparando', EJECUTANDO: 'Simulando', PAUSADA: 'Detenido', TERMINADA: 'Finalizado',
+    COLAPSO: 'Colapso' };
+  const esColapso = () => modo === 'COLAPSO';
 
   // ================================================================ tema claro / oscuro
   function leerColores() {
@@ -466,11 +473,13 @@
   // ================================================================ barra superior y panel de indicadores
   function actualizarPaneles() {
     const sinSim = !estado || estado.estado === 'SIN_SIMULACION';
-    const e = sinSim ? 'SIN_SIMULACION' : estado.estado;
+    let e = sinSim ? 'SIN_SIMULACION' : estado.estado;
+    if (e === 'TERMINADA' && estado.tipoFin === 'COLAPSO') e = 'COLAPSO';   // v04: etiqueta "Colapso" en rojo
     const chip = $('estado');
     chip.className = 'estado ' + e;
     chip.querySelector('span').textContent = ESTADOS_SIM[e] || e;
 
+    $('bloqueLinea').hidden = esColapso();           // v04: el colapso no tiene duración definida
     $('btnDetener').disabled = e !== 'EJECUTANDO';
     $('btnDetener').hidden = e === 'PAUSADA';
     $('btnReanudar').hidden = e !== 'PAUSADA';
@@ -478,7 +487,9 @@
     const vacio = $('avisoVacio');
     if (sinSim) {
       vacio.hidden = false;
-      vacio.innerHTML = '<b>Simulación de 5 días</b><span>Elige la fecha y hora de inicio arriba y presiona <em>Iniciar</em>.</span>';
+      vacio.innerHTML = esColapso()
+        ? '<b>Simulación hasta el colapso</b><span>Elige la fecha y hora de inicio arriba y presiona <em>Iniciar</em>. Continúa hasta que un pedido no se entregue a tiempo.</span>'
+        : '<b>Simulación de 5 días</b><span>Elige la fecha y hora de inicio arriba y presiona <em>Iniciar</em>.</span>';
     } else if (estado.ciclos === 0) {
       vacio.hidden = false;
       vacio.innerHTML = '<div class="cargando"></div><b>Preparando la simulación</b><span>Leyendo pedidos y bloqueos y calculando el primer plan de rutas…</span>';
@@ -1116,15 +1127,86 @@
     errorMostrado = estado.error;
     if (estado.estado === 'TERMINADA' && finMostrado !== clave) {
       finMostrado = clave;
-      if (estado.motivoFin.startsWith('Fin de la simulación')) mostrarResumenFinal();
+      if (estado.tipoFin === 'COLAPSO') avisarColapso();                                   // v04
+      else if (estado.tipoFin === 'FIN_PERIODO' || estado.tipoFin === 'SIN_COLAPSO') mostrarResumenFinal();
       else avisar(estado.motivoFin, 'alerta');
     }
   }
 
   function mostrarResumenFinal() {
-    const r = estado.resumen;
     const ini = fechaLocal(estado.inicio), fin = fechaLocal(estado.hora);
+    $('finTitulo').textContent = estado.tipoFin === 'SIN_COLAPSO' ? 'Simulación hasta el colapso terminada sin colapso' : 'Simulación de 5 días terminada';
     $('finPeriodo').textContent = `Del ${fmtFecha(ini)} al ${fmtFecha(fin)} · duró ${fmtDur(estado.segundosReales)} en tiempo real · algoritmo ${estado.algoritmo}`;
+    const fc = $('finColapso');
+    fc.hidden = estado.tipoFin !== 'SIN_COLAPSO';
+    fc.innerHTML = fc.hidden ? '' : `<p class="colapso-motivo ok">${esc(estado.motivoFin)}.</p>`;
+    llenarIndicadoresFinales();
+    $('modalFin').showModal();
+  }
+
+  // ================================================================ v04: colapso
+  const fmtHoras = (h) => `${Number(h).toLocaleString('es-PE', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} h`;
+  /** Al colapsar: alerta roja que no se cierra sola, reporte del colapso y el mapa centrado en el pedido involucrado. */
+  function avisarColapso() {
+    const c = estado.colapso;
+    if (alertaColapso) alertaColapso.remove();
+    const d = document.createElement('div');
+    d.className = 'aviso colapso';
+    d.setAttribute('role', 'alert');
+    const quien = c && c.pedido ? `el pedido ${c.pedido.id} no se entregó a tiempo` : (c ? c.detalle : estado.motivoFin);
+    d.innerHTML = `<b>Colapso logístico</b><span>${esc(fmtFecha(fechaLocal(c ? c.hora : estado.hora)))} · Tc = ${c ? fmtHoras(c.tc) : '—'}: ${esc(quien)}.</span>
+      <span class="acciones-aviso"><button class="btn peligro" data-accion="reporte">Ver reporte</button><button class="cerrar-aviso" data-accion="cerrar" aria-label="Cerrar alerta">×</button></span>`;
+    d.addEventListener('click', (ev) => {
+      const a = ev.target.closest('[data-accion]');
+      if (!a) return;
+      if (a.dataset.accion === 'reporte') mostrarReporteColapso();
+      else { d.remove(); alertaColapso = null; }
+    });
+    $('avisos').appendChild(d);
+    alertaColapso = d;
+    if (c && c.pedido) { $('buscar').value = ''; botonLimpiar(); seleccionar({ tipo: 'pedido', id: c.pedido.id }, true); }
+    mostrarReporteColapso();
+  }
+  /** Reporte del colapso: instante, Tc, criterio, pedido involucrado, estado de la flota e indicadores acumulados. */
+  function mostrarReporteColapso() {
+    const c = estado.colapso;
+    const ini = fechaLocal(estado.inicio), fin = fechaLocal(c ? c.hora : estado.hora);
+    $('finTitulo').textContent = 'Colapso logístico';
+    $('finPeriodo').textContent = `Del ${fmtFecha(ini)} al ${fmtFecha(fin)} · duró ${fmtDur(estado.segundosReales)} en tiempo real · algoritmo ${estado.algoritmo}`;
+    let html = '';
+    if (c) {
+      html += `<div class="colapso-cabecera"><div><b>${esc(fmtFecha(fin))}</b><span>Fecha y hora simulada del colapso</span></div>
+        <div><b>${fmtHoras(c.tc)}</b><span>Tc · ${fmtDur(c.tc * 3600)} desde el inicio</span></div></div>
+        <p class="colapso-motivo">Criterio ${esc(c.criterio)}: ${esc(c.descripcion)}.</p>`;
+      if (c.pedido) {
+        const p = c.pedido;
+        const lleva = p.unidades.length ? p.unidades.map(esc).join(', ') : 'ninguna (sin asignar)';
+        html += `<h3 class="colapso-sub">Pedido involucrado</h3>
+          <dl class="colapso-pedido">
+            <dt>Pedido</dt><dd>${esc(p.id)} · cliente ${esc(p.cliente)} · (${p.x}, ${p.y})</dd>
+            <dt>Cantidad</dt><dd>${p.entregado} de ${p.cantidad} entregados</dd>
+            <dt>Plazo</dt><dd>${p.plazo} h · registrado ${esc(fmtCorta(p.registro))} · límite ${esc(fmtCorta(p.limite))}</dd>
+            <dt>Unidad asignada</dt><dd>${lleva}</dd>
+          </dl>`;
+      }
+      const f = c.flota;
+      html += `<h3 class="colapso-sub">Estado de la flota en ese instante</h3>
+        <div class="colapso-flota">
+          <div><b>${f.enRuta}</b><span>En ruta</span></div><div><b>${f.disponibles}</b><span>Disponibles</span></div>
+          <div><b>${f.mantenimiento}</b><span>En mantenimiento</span></div>
+          <div><b>${f.averiadasTipo1} · ${f.averiadasTipo2} · ${f.averiadasTipo3}</b><span>Averiadas (T1 · T2 · T3)</span></div>
+        </div>
+        <h3 class="colapso-sub">Indicadores hasta el colapso</h3>`;
+    }
+    const fc = $('finColapso');
+    fc.innerHTML = html;
+    fc.hidden = !html;
+    llenarIndicadoresFinales();
+    if (!$('modalFin').open) $('modalFin').showModal();
+  }
+  /** Indicadores acumulados del escenario (los mismos al terminar los 5 días, al colapsar o sin colapso). */
+  function llenarIndicadoresFinales() {
+    const r = estado.resumen;
     const celdas = [
       [num(r.entregados), 'Pedidos entregados'],
       [(r.entregados + r.vencidosSinEntregar ? r.pctATiempo.toFixed(1) : '100.0') + '%', 'Entregados a tiempo'],
@@ -1140,9 +1222,12 @@
       [num(r.devueltos), 'Devueltos al central'],
     ];
     $('finGrid').innerHTML = celdas.map(([v, t]) => `<div><b>${v}</b><span>${t}</span></div>`).join('');
-    $('modalFin').showModal();
   }
-  $('finCerrar').onclick = () => $('modalFin').close();
+  $('finCerrar').onclick = () => {
+    $('modalFin').close();
+    const c = estado && estado.colapso;   // v04: al volver al mapa tras el colapso, queda elegido el pedido involucrado
+    if (c && c.pedido && estado.estado === 'TERMINADA') seleccionar({ tipo: 'pedido', id: c.pedido.id }, true);
+  };
   $('finNueva').onclick = () => { $('modalFin').close(); $('fecha').focus(); };
 
   // ================================================================ controles de la simulación
@@ -1156,17 +1241,30 @@
     const v = $('fecha').value;
     if (!v) { avisar('Elige la fecha y hora de inicio.', 'alerta'); $('fecha').focus(); return; }
     try {
-      await post(`/api/simulacion?escenario=SEMANAL&fecha=${encodeURIComponent(v)}`);
+      const m = modo;
+      await post(`/api/simulacion?escenario=${m}&fecha=${encodeURIComponent(v)}`);
       sel = null; anterior = null; anim.clear(); finMostrado = ''; propias.clear();
+      if (alertaColapso) { alertaColapso.remove(); alertaColapso = null; }
       $('buscar').value = ''; botonLimpiar();
       mostrarDetalle();
-      avisar(`Simulación de 5 días iniciada desde el ${fmtFecha(fechaLocal(v))}.`);
+      avisar(`${m === 'COLAPSO' ? 'Simulación hasta el colapso' : 'Simulación de 5 días'} iniciada desde el ${fmtFecha(fechaLocal(v))}.`);
     } catch (e) { avisar('No se pudo iniciar: ' + e.message, 'error'); }
   }
   $('btnIniciar').onclick = () => {
     if (estado && (estado.estado === 'EJECUTANDO' || estado.estado === 'PAUSADA')) $('modalConfirmar').showModal();
     else iniciar();
   };
+  /** v04: selector "5 Días" / "Colapso" de la barra superior. */
+  function elegirModo(m) {
+    modo = m === 'COLAPSO' ? 'COLAPSO' : 'SEMANAL';
+    $('modo5d').classList.toggle('activo', modo === 'SEMANAL');
+    $('modo5d').setAttribute('aria-pressed', String(modo === 'SEMANAL'));
+    $('modoColapso').classList.toggle('activo', modo === 'COLAPSO');
+    $('modoColapso').setAttribute('aria-pressed', String(modo === 'COLAPSO'));
+    actualizarPaneles();
+  }
+  $('modo5d').onclick = () => elegirModo('SEMANAL');
+  $('modoColapso').onclick = () => elegirModo('COLAPSO');
   $('confNo').onclick = () => $('modalConfirmar').close();
   $('confSi').onclick = () => { $('modalConfirmar').close(); iniciar(); };
   $('btnDetener').onclick = () => post('/api/simulacion/detener').catch((e) => avisar(e.message, 'error'));
@@ -1190,6 +1288,10 @@
       anterior = estado;
       estado = JSON.parse(m.data);
       if (estado.unidades) prepararAnimacion(); else anim.clear();
+      if (estado.escenario && estado.estado !== 'SIN_SIMULACION' && estado.escenario + estado.inicio !== escenarioVisto) {
+        escenarioVisto = estado.escenario + estado.inicio;   // v04: una simulación nueva fija el modo mostrado
+        if (estado.escenario === 'COLAPSO' || estado.escenario === 'SEMANAL') elegirModo(estado.escenario);
+      }
       recibidoEn = ahora;
       $('estado').classList.remove('desconectado');
       actualizarPaneles();

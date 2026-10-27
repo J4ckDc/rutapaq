@@ -249,6 +249,7 @@ public final class Servidor {
                 + ",\"fechaInicio\":" + Json.str(cfg.texto("escenario.fechaInicio", "2026-01-01"))
                 + ",\"horaInicio\":" + Json.str(cfg.texto("escenario.horaInicio", "00:00"))
                 + ",\"minutosSemanal\":" + Json.num(cfg.decimal("escenario.semanal.minutosReales", 30))
+                + ",\"factorColapso\":" + Json.num(cfg.decimal("escenario.colapso.factor", 600))
                 + ",\"averiaTipo1Horas\":" + Json.num(cfg.decimal("averia.tipo1.horas", 2))
                 + ",\"averiaEnLugarHoras\":" + Json.num(cfg.decimal("averia.enLugar.horas", 4))
                 + ",\"averiaTipo3Dias\":" + Json.num(cfg.decimal("averia.tipo3.diasMinimos", 2))
