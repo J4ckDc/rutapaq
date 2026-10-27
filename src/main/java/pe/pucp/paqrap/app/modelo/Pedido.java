@@ -18,6 +18,12 @@ public final class Pedido {
     public double llegadaFinal = -1;   // llegada de la entrega que completó el pedido
     public double liberado = -1;       // fin del acondicionamiento de esa entrega
     public boolean vencido;
+    /**
+     * v03: cuánto se parte lo que falta asignar del pedido. 0: en partes de ien.maximoProductosPorEntrega (como
+     * siempre); 1: si el planificador no logró asignarlo, en partes de la capacidad de la moto, para que lo puedan
+     * llevar entre varias unidades (entregas parciales).
+     */
+    public int particion;
 
     public Pedido(String id, String cliente, Nodo nodo, int cantidad, int plazoHoras, double registro) {
         this.id = id;
