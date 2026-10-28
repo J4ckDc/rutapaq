@@ -1,4 +1,4 @@
-Carpeta de datos de RUTAPAQ (v03).
+Carpeta de datos de RUTAPAQ (v0.4.1).
 
 Contiene los archivos publicados por el profesor (versión v20260909), enero 2026 a diciembre 2028:
 
@@ -9,12 +9,8 @@ Contiene los archivos publicados por el profesor (versión v20260909), enero 202
   mant.preventivo.09.10.txt  mantenimiento preventivo, aaaammdd:TTNN  (ej. 20260901:TA01)
                              El plan es bimensual y se repite cada 2 meses: setiembre vale para
                              los meses impares y octubre para los pares.
-  averias.aaaamm.txt         (v03) averías programadas para la simulación de 5 días y la de colapso
-                             ##d##h##m:TTNN,tipo   ej. 05d10h20m:TA03,2   (tipo 1, 2 o 3)
-                             Formato definido por el equipo: el curso aún no publica el suyo.
-                             Los archivos de ene-2026 a dic-2028 son de prueba (2 averías por día) y se
-                             generan con: java -jar rutapaq.jar generar-averias datos 202601 202812 2 7
-                             Para simular sin ellas: averia.archivo.habilitado=false en config.properties.
+  Las averías no se leen de archivo: solo se registran de forma manual desde el visualizador
+  (botón Registrar avería), por indicación del profesor.
 
 Para usar otra versión de los datos, reemplace los archivos manteniendo los nombres.
 Si una línea no tiene el formato esperado, el servidor la informa en la consola y el

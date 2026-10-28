@@ -69,7 +69,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .app {
   display: grid;
   grid-template-columns: 210px 1fr;
-  grid-template-rows: 64px 1fr;
+  grid-template-rows: minmax(64px, auto) 1fr;   /* v0.4.1: si la barra no cabe en una fila, pasa a dos en vez de desbordarse */
   grid-template-areas: "menu barra" "menu escena";
   height: 100vh;
 }
@@ -108,8 +108,8 @@ nav { display: flex; flex-direction: column; gap: 2px; padding: 14px 8px; }
 /* ------------------------------------------------------------------ barra superior */
 .barra {
   grid-area: barra;
-  display: flex; align-items: center; gap: 18px;
-  padding: 0 16px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 18px; row-gap: 6px;
+  padding: 6px 16px;
   background: var(--superficie);
   border-bottom: 1px solid var(--borde);
   min-width: 0;
@@ -139,14 +139,20 @@ nav { display: flex; flex-direction: column; gap: 2px; padding: 14px 8px; }
 .btn.primario { background: var(--cian); border-color: var(--cian); color: #04121c; }
 .btn.primario:hover:not(:disabled) { filter: brightness(1.08); }
 
-.tiempos { display: flex; flex-direction: column; line-height: 1.2; padding-left: 18px; border-left: 1px solid var(--borde); }
-.reloj { font-size: 15px; font-weight: 600; letter-spacing: .3px; }
-.sub-reloj { display: flex; gap: 12px; color: var(--texto-2); font-size: 11.5px; white-space: nowrap; }
-.sub-reloj span:empty { display: none; }
+/* v0.4.1: los 4 tiempos con su etiqueta (Eval-4D C12 a C16; P&R hoja Guía, ítems 35 a 39) */
+.tiempos { display: grid; grid-template-columns: auto auto; column-gap: 16px; row-gap: 2px; align-items: baseline;
+  line-height: 1.25; padding-left: 18px; border-left: 1px solid var(--borde); }
+.t-dato { white-space: nowrap; font-size: 12px; }
+.t-dato .et { color: var(--texto-2); font-size: 11.5px; }
+.t-dato .et::before { content: attr(data-largo); }
+.t-dato b { font-family: "Cascadia Mono", "Consolas", ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums;
+  font-weight: 600; font-size: 12.5px; color: var(--texto); }
+.t-dato.principal b { font-size: 14px; letter-spacing: .2px; }
 .kpis { display: flex; gap: 22px; padding-left: 18px; border-left: 1px solid var(--borde); }
 .kpi { display: flex; flex-direction: column; line-height: 1.15; }
 .kpi b { font-size: 21px; font-weight: 600; }
 .kpi span { color: var(--texto-2); font-size: 11.5px; white-space: nowrap; }
+.kpi .kl::before { content: attr(data-largo); }
 .cian { color: var(--cian); }
 .derecha { margin-left: auto; display: flex; align-items: center; gap: 12px; }
 .estado { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; color: var(--texto-2); white-space: nowrap; }
@@ -194,12 +200,14 @@ nav { display: flex; flex-direction: column; gap: 2px; padding: 14px 8px; }
 .bloque { padding: 14px 16px; border-bottom: 1px solid var(--borde); }
 .bloque:last-child { border-bottom: 0; }
 .almacenes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
-.almacenes li { display: grid; grid-template-columns: 10px 1fr auto auto; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; border-radius: 6px; padding: 2px 4px; margin: 0 -4px; }
+.almacenes li { display: grid; grid-template-columns: 14px 1fr auto; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; border-radius: 6px; padding: 2px 4px; margin: 0 -4px; }
+.almacenes li .p { justify-self: center; }
+.casa-mini { width: 14px; height: 14px; color: var(--naranja); }
+.cab-almacenes { display: flex; justify-content: space-between; margin: -2px 0 6px; color: var(--texto-3); font-size: 10.5px; letter-spacing: .4px; }
 .almacenes li:hover { background: var(--superficie-2); }
-.almacenes .stock { color: var(--texto-2); font-size: 11.5px; }
 .almacenes .pct { font-size: 12.5px; font-weight: 600; }
 .p { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--texto-3); flex: none; }
-.p.VERDE { background: var(--verde); } .p.AMBAR { background: var(--ambar); } .p.ROJO { background: var(--rojo); } .p.CENTRAL { background: var(--naranja); }
+.p.VERDE { background: var(--verde); } .p.AMBAR { background: var(--ambar); } .p.ROJO { background: var(--rojo); }
 .t-VERDE { color: var(--verde); } .t-AMBAR { color: var(--ambar); } .t-ROJO { color: var(--rojo); } .t-NEUTRO { color: var(--texto); }
 .leyenda-mini { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 10px; color: var(--texto-3); font-size: 11px; align-items: center; }
 .leyenda-mini span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
@@ -429,6 +437,8 @@ nav { display: flex; flex-direction: column; gap: 2px; padding: 14px 8px; }
 .sim.anillo-trasvase { width: 28px; height: 28px; justify-content: center; border: 1.6px dashed var(--naranja); border-radius: 50%; }
 .sim.anillo-trasvase-camino { width: 28px; height: 28px; justify-content: center; border: 1.6px solid var(--naranja); border-radius: 50%; }
 .parada.roja { background: var(--rojo); }
+.dist-ley { display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; color: #fff; font: 700 9.5px system-ui; font-style: normal; }
+.dist-ley.t1 { background: var(--ambar); } .dist-ley.t2 { background: var(--naranja); } .dist-ley.t3 { background: var(--rojo); }
 
 /* diálogo para registrar una avería */
 .campo { display: flex; flex-direction: column; gap: 4px; margin: 12px 0; color: var(--texto-2); font-size: 12.5px; }
@@ -447,10 +457,21 @@ nav { display: flex; flex-direction: column; gap: 2px; padding: 14px 8px; }
 .error-form { margin: 0 0 12px; color: var(--rojo); font-size: 12.5px; }
 
 /* ------------------------------------------------------------------ pantallas medianas y pequeñas */
-@media (max-width: 1500px) {
-  .sub-reloj #tHoy { display: none; }
+/* v0.4.1: la barra mantiene visibles los 4 tiempos; para hacerles espacio se compactan los demás elementos */
+@media (max-width: 1800px) {
+  .t-dato .et::before { content: attr(data-corto); }
+  .tiempos { column-gap: 12px; }
 }
-@media (max-width: 1440px) {
+@media (max-width: 1480px) {
+  .barra { gap: 12px; }
+  .tiempos, .kpis { padding-left: 12px; }
+  .kpis { gap: 14px; }
+  .kpi .kl::before { content: attr(data-corto); }
+}
+@media (max-width: 1400px) {
+  .estado > span { display: none; }
+}
+@media (max-width: 1640px) {
   .app, .app.menu-plegado { grid-template-columns: 64px 1fr; }
   .marca-texto, .nav-item span, .version { display: none; }
   .nav-item { justify-content: center; padding: 10px 0; }
@@ -461,16 +482,13 @@ nav { display: flex; flex-direction: column; gap: 2px; padding: 14px 8px; }
   .ficha b { font-size: 20px; }
   .datos { gap: 3px; }
 }
-@media (max-width: 1280px) {
-  .kpis { gap: 14px; }
-  .tiempos, .kpis { padding-left: 12px; }
-  .barra { gap: 12px; }
+@media (max-width: 1340px) {
+  .barra .btn span { display: none; }
+  .barra .btn { padding: 0 10px; }
 }
-@media (max-width: 1100px) {
-  .barra { gap: 10px; padding: 0 10px; }
+@media (max-width: 1200px) {
+  .barra { gap: 10px; padding: 6px 10px; }
   .kpis { display: none; }
-  .btn span { display: none; }
-  .btn { padding: 0 10px; }
 }
 @media (max-width: 760px) {
   body { overflow: auto; }
@@ -479,13 +497,17 @@ nav { display: flex; flex-direction: column; gap: 2px; padding: 14px 8px; }
   .marca, .menu-pie { display: none; }
   nav { flex-direction: row; padding: 4px; overflow-x: auto; }
   .barra { flex-wrap: wrap; height: auto; padding: 8px 12px; row-gap: 8px; }
-  .grupo-control { width: 100%; }
+  .grupo-control { flex: 1 1 200px; min-width: 0; }
   .campo-fecha { flex: 1; min-width: 0; }
-  .campo-fecha input { width: 100%; min-width: 0; }
+  .campo-fecha input { width: 100%; min-width: 0; font-size: 11.5px; }
+  .campo-fecha { padding: 0 8px; gap: 6px; }
+  .grupo-control { gap: 6px; }
+  .derecha { gap: 8px; }
   .segmentado { display: none; }
-  .tiempos { border-left: 0; padding-left: 0; }
-  .sub-reloj { display: none; }
-  .derecha { margin-left: auto; }
+  .tiempos { border-left: 0; padding-left: 0; order: 3; width: 100%; column-gap: 10px; }
+  .t-dato, .t-dato .et { font-size: 11px; }
+  .t-dato b, .t-dato.principal b { font-size: 11.5px; }
+  .derecha { margin-left: auto; order: 1; }
   .panel.izq, .panel.der { left: 8px; right: 8px; width: auto; top: auto; bottom: 8px; max-height: 55%; }
   .reabrir { top: auto; bottom: 8px; }
   .detalle { bottom: 8px; }

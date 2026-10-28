@@ -29,7 +29,6 @@ public final class ReglasAveria {
     public final LocalTime horaRetornoTipo3;
     public final double minutosTrasvase;
     public final boolean trasvaseHabilitado;
-    public final boolean archivoHabilitado;
 
     public ReglasAveria(Config cfg) {
         this(cfg.decimal("averia.tipo1.horas", 2),
@@ -37,19 +36,17 @@ public final class ReglasAveria {
                 cfg.decimal("averia.tipo3.diasMinimos", 2),
                 LocalTime.parse(cfg.texto("averia.tipo3.horaRetorno", "15:00")),
                 cfg.decimal("averia.trasvase.minutos", 30),
-                Boolean.parseBoolean(cfg.texto("averia.trasvase.habilitado", "true")),
-                Boolean.parseBoolean(cfg.texto("averia.archivo.habilitado", "true")));
+                Boolean.parseBoolean(cfg.texto("averia.trasvase.habilitado", "true")));
     }
 
     public ReglasAveria(double horasTipo1, double horasEnLugar, double diasTipo3, LocalTime horaRetornoTipo3,
-                        double minutosTrasvase, boolean trasvaseHabilitado, boolean archivoHabilitado) {
+                        double minutosTrasvase, boolean trasvaseHabilitado) {
         this.horasTipo1 = horasTipo1;
         this.horasEnLugar = horasEnLugar;
         this.diasTipo3 = diasTipo3;
         this.horaRetornoTipo3 = horaRetornoTipo3;
         this.minutosTrasvase = minutosTrasvase;
         this.trasvaseHabilitado = trasvaseHabilitado;
-        this.archivoHabilitado = archivoHabilitado;
     }
 
     public static void validarTipo(int tipo) {

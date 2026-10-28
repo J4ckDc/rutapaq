@@ -57,8 +57,8 @@ import java.util.Set;
  *   - El % a tiempo cuenta también los pedidos vencidos que aún no se entregan.
  *
  * Cambios v03 (averías, P&R pregunta 3; reglas en ReglasAveria):
- *   - Una avería se registra desde el visualizador (registrarAveria) o desde el archivo de averías programadas
- *     (averias.aaaamm.txt, escenarios de 5 días y colapso). La unidad queda detenida en su posición exacta, sus
+ *   - Una avería se registra solo de forma manual desde el visualizador (registrarAveria), en cualquier escenario
+ *     (v0.4.1, indicación del profesor). La unidad queda detenida en su posición exacta, sus
  *     pedidos vuelven al planificador y se replanifica de inmediato con un ciclo extraordinario (RF07-01).
  *   - Tipo 1: detenida 2 h con su carga; el planificador la sigue considerando desde que termina la avería.
  *   - Tipos 2 y 3: no reciben rutas. Durante las 4 h que permanecen en el lugar, sus paquetes se pueden trasvasar
@@ -78,7 +78,7 @@ import java.util.Set;
  *   - Al colapsar se guarda el reporte del colapso (colapsoJson): criterio, fecha y hora, Tc, pedido involucrado y
  *     estado de la flota en ese instante; el estado publicado indica además cómo terminó (tipoFin).
  *   - Si se acaban los datos de ventas y ya se entregó todo, termina "sin colapso" (SIN_COLAPSO).
- *   - Las averías programadas del archivo no se usan en el colapso, salvo averia.archivo.colapso=true.
+ *   - v0.4.1: las averías tampoco se leen de archivo en el colapso; se registran solo desde el visualizador.
  */
 public final class Simulacion implements Runnable {
 
@@ -140,7 +140,7 @@ public final class Simulacion implements Runnable {
     private final LocalDateTime finDatos;
 
     private int contador, recibidos, completados, enPlazo, vencidos, ciclos, sinPlanificar, iteraciones;
-    private int contadorAverias, averiasOmitidas, trasvasados, devueltos;   // v03
+    private int contadorAverias, trasvasados, devueltos;   // v03
     private long msUltimoPlan, msMaximoPlan;
     private double costo, kmTotal;
     private String ultimoError = "";
@@ -152,16 +152,7 @@ public final class Simulacion implements Runnable {
         this.planificador = planificador;
         this.semaforo = new Indicadores(cfg);
         this.reglas = new ReglasAveria(cfg);
-        // v03: las averías programadas del archivo se usan en la simulación de 5 días y en la de colapso;
-        // en la operación día a día se registran desde el visualizador.
-        // v04: en la simulación hasta el colapso, las averías del archivo solo se usan si averia.archivo.colapso=true
-        //     (por defecto no: los archivos actuales son de prueba, generados por el equipo, no datos del curso).
-        boolean averiasArchivo = reglas.archivoHabilitado && switch (escenario) {
-            case SEMANAL -> true;
-            case COLAPSO -> Boolean.parseBoolean(cfg.texto("averia.archivo.colapso", "false"));
-            case DIA_A_DIA -> false;
-        };
-        this.fuente = new FuenteDatos(Path.of(cfg.texto("datos.carpeta", "datos")), inicio, averiasArchivo);
+        this.fuente = new FuenteDatos(Path.of(cfg.texto("datos.carpeta", "datos")), inicio);
         this.finDatos = FuenteDatos.finDeVentas(Path.of(cfg.texto("datos.carpeta", "datos")));
         this.mantenimiento = new PlanMantenimiento(Path.of(cfg.texto("datos.carpeta", "datos")));
         this.mapa = new MapaReticula(cfg.entero("ien.mapaAnchoKm", 70), cfg.entero("ien.mapaAltoKm", 50));
@@ -394,12 +385,8 @@ public final class Simulacion implements Runnable {
             else if (!toca && u.enMantenimiento) u.enMantenimiento = false;   // vuelve disponible en el central
         }
 
-        // 3c. averías (v03): traslados al almacén central y retornos de las vigentes; luego las programadas
+        // 3c. averías (v03): traslados al almacén central y retornos de las vigentes
         revisarAverias();
-        for (Formato.LineaAveria a : fuente.averiasHasta(ahora)) {
-            if (a.instante().isBefore(inicio)) continue;
-            averiaProgramada(a);
-        }
 
         // 4. ciclo de planificación (también el extraordinario que pide una avería)
         if (t >= proximoCiclo) {
@@ -516,18 +503,6 @@ public final class Simulacion implements Runnable {
         }
         if (u.enMantenimiento) return u.id + " está en mantenimiento preventivo";
         return null;
-    }
-
-    /** Avería leída del archivo de averías programadas. Si la unidad no puede averiarse en ese instante, se omite. */
-    private void averiaProgramada(Formato.LineaAveria a) {
-        Unidad u = unidadPorId.get(a.unidad());
-        String motivo = u == null ? "la unidad " + a.unidad() + " no existe en la flota" : motivoNoAveriable(u);
-        if (motivo != null) {
-            averiasOmitidas++;
-            System.err.printf("Avería programada omitida (%s, %s, tipo %d): %s%n", a.instante(), a.unidad(), a.tipo(), motivo);
-            return;
-        }
-        averiar(u, a.tipo(), Math.max(0, Math.min(t, segundos(a.instante()))), Averia.ARCHIVO);
     }
 
     /**
@@ -1144,7 +1119,6 @@ public final class Simulacion implements Runnable {
                 .append(",\"averiadasTipo2\":").append(porTipo[2])
                 .append(",\"averiadasTipo3\":").append(porTipo[3])
                 .append(",\"averias\":").append(averias.size())
-                .append(",\"averiasOmitidas\":").append(averiasOmitidas)
                 .append(",\"trasvasados\":").append(trasvasados)
                 .append(",\"devueltos\":").append(devueltos)
                 .append(",\"flota\":").append(unidades.size())
@@ -1170,10 +1144,11 @@ public final class Simulacion implements Runnable {
                     .append(",\"x\":").append(a.nodo.x()).append(",\"y\":").append(a.nodo.y())
                     .append(",\"central\":").append(a.infinito());
             if (!a.infinito()) {
-                double consumo = 100.0 * (a.capacidad - a.stock) / a.capacidad;
+                // v0.4.1: el semáforo del almacén intermedio va por % de stock respecto de su capacidad
+                double stockPct = 100.0 * a.stock / a.capacidad;
                 b.append(",\"stock\":").append(a.stock).append(",\"capacidad\":").append(a.capacidad)
-                        .append(",\"consumoPct\":").append(Json.num(consumo))
-                        .append(",\"nivel\":").append(Json.str(semaforo.menorEsMejor("almacen", consumo, 70, 90).name()));
+                        .append(",\"stockPct\":").append(Json.num(stockPct))
+                        .append(",\"nivel\":").append(Json.str(semaforo.mayorEsMejor("almacen", stockPct, 30, 10).name()));
             }
             b.append(",\"recargan\":");
             lista(b, vanARecargar.getOrDefault(a.id, Set.of()));
