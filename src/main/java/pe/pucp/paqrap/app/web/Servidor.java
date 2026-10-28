@@ -254,7 +254,9 @@ public final class Servidor {
                 + ",\"averiaEnLugarHoras\":" + Json.num(cfg.decimal("averia.enLugar.horas", 4))
                 + ",\"averiaTipo3Dias\":" + Json.num(cfg.decimal("averia.tipo3.diasMinimos", 2))
                 + ",\"averiaTipo3Hora\":" + Json.str(cfg.texto("averia.tipo3.horaRetorno", "15:00"))
-                + ",\"averiaTrasvaseMinutos\":" + Json.num(cfg.decimal("averia.trasvase.minutos", 30)) + "}");
+                + ",\"averiaTrasvaseMinutos\":" + Json.num(cfg.decimal("averia.trasvase.minutos", 30))
+                + ",\"stockVerde\":" + Json.num(cfg.decimal("semaforo.almacen.verde", 30))
+                + ",\"stockAmbar\":" + Json.num(cfg.decimal("semaforo.almacen.ambar", 10)) + "}");
     }
 
     // ---------------------------------------------------------------- archivos estáticos

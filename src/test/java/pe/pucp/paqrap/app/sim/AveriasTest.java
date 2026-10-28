@@ -11,12 +11,10 @@ import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
-import java.time.YearMonth;
 
 import org.junit.jupiter.api.Test;
 
 import pe.pucp.paqrap.app.Config;
-import pe.pucp.paqrap.app.datos.Formato;
 import pe.pucp.paqrap.app.modelo.Averia;
 import pe.pucp.paqrap.app.modelo.Nodo;
 import pe.pucp.paqrap.app.modelo.Parada;
@@ -66,7 +64,7 @@ class AveriasTest {
 
     @Test
     void lasReglasDeDisponibilidadSiguenLaRespuestaDelCurso() {
-        ReglasAveria r = new ReglasAveria(2, 4, 2, LocalTime.of(15, 0), 30, true, true);
+        ReglasAveria r = new ReglasAveria(2, 4, 2, LocalTime.of(15, 0), 30, true);
         LocalDate dia = LocalDate.of(2026, 1, 12);
         LocalDateTime d = dia.atTime(10, 20);
         assertEquals(d.plusHours(2), r.disponible(1, d), "tipo 1: 2 h");
@@ -82,28 +80,6 @@ class AveriasTest {
         assertEquals(dia.atTime(15, 0), r.disponible(2, dia.atTime(6, 0)), "06:00 pertenece al turno de 23:00");
         assertEquals(dia.plusDays(3).atTime(15, 0), r.disponible(3, dia.atTime(16, 0)), "a las 15:00 del día 2 aún no pasan 2 días");
         assertEquals(dia.plusDays(2).atTime(15, 0), r.disponible(3, dia.atTime(15, 0)));
-    }
-
-    @Test
-    void elArchivoDeAveriasProgramadasTieneUnFormatoSimple() {
-        YearMonth m = YearMonth.of(2026, 3);
-        assertEquals("averias.202603.txt", Formato.archivoAverias(m));
-        Formato.LineaAveria a = Formato.averia(m, "05d10h20m:TA03,2");
-        assertEquals(LocalDateTime.of(2026, 3, 5, 10, 20), a.instante());
-        assertEquals("TA03", a.unidad());
-        assertEquals(2, a.tipo());
-        assertEquals("TM12", Formato.averia(m, " 01d00h05m : tm12 , TI3 ").unidad());
-        assertEquals(3, Formato.averia(m, "01d00h05m:TM12,TI3").tipo());
-        assertEquals(1, Formato.averia(m, "01d00h05m:TB01,T1").tipo());
-        for (String mala : new String[]{"01d00h05m:TA01,4", "TA01,2", "01d00h05m:TA01"}) {
-            boolean rechazada = false;
-            try {
-                Formato.averia(m, mala);
-            } catch (IllegalArgumentException e) {
-                rechazada = true;
-            }
-            assertTrue(rechazada, "debe rechazar: " + mala);
-        }
     }
 
     @Test
@@ -248,29 +224,19 @@ class AveriasTest {
     }
 
     @Test
-    void lasAveriasProgramadasSeAplicanEnSuInstanteYSeOmitenLasQueNoCorresponden() throws IOException {
+    void lasAveriasSoloSeRegistranDeFormaManualYUnArchivoEnDatosNoSeUsa() throws IOException {
+        // v0.4.1: indicación del profesor, las averías se ingresan solo de forma manual desde el visualizador
         LocalDate dia = LocalDate.of(2026, 3, 2);
         Simulacion s = nueva(dia.atTime(8, 0));
-        Files.writeString(carpeta.resolve("averias.202603.txt"), String.join("\n",
-                "# averías de prueba",
-                "01d09h00m:TM02,3",            // antes del inicio de la simulación: no se usa
-                "02d09h00m:TM01,1",
-                "02d09h30m:TM01,2",            // TM01 sigue averiada hasta las 11:00: se omite
-                "02d10h00m:TX99,2",            // no existe en la flota: se omite
-                "02d10h00m:esto no es una avería") + "\n");
-        hasta(s, dia.atTime(9, 1));
-        Averia av = s.unidad("TM01").averia;
-        assertTrue(av != null && av.tipo == 1);
-        assertEquals(Averia.ARCHIVO, av.origen);
-        assertEquals(3600.0, av.inicio, 1.0E-9, "ocurre en el instante del archivo");
-
+        Files.writeString(carpeta.resolve("averias.202603.txt"), "02d09h00m:TM01,1\n02d09h30m:TM02,2\n");
         hasta(s, dia.atTime(10, 1));
+        assertTrue(s.averias().isEmpty(), "el archivo no genera averías");
+        assertEquals(null, s.unidad("TM01").averia);
+        assertTrue(s.snapshotJson().contains("\"lineasConError\":0"));
+
+        Averia av = s.registrarAveria("TM01", 1);
+        assertEquals(Averia.VISUALIZADOR, av.origen);
         assertEquals(1, s.averias().size());
-        String json = s.snapshotJson();
-        assertTrue(json.contains("\"averiasOmitidas\":2"), json.substring(0, 400));
-        assertTrue(json.contains("\"lineasConError\":1"));
-        assertTrue(json.contains("\"estado\":\"AVERIADA\""));
-        assertEquals(null, s.unidad("TM02").averia);
     }
 
     @Test

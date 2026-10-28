@@ -1,4 +1,4 @@
-// RUTAPAQ v04 – visualizador del Simulador de rutas: simulación de 5 días y hasta el colapso, con averías de las unidades.
+// RUTAPAQ v0.4.1 – visualizador del Simulador de rutas: simulación de 5 días y hasta el colapso, con averías de las unidades.
 // Recibe el estado completo por SSE (/api/stream) cada ~500 ms y lo dibuja en un canvas.
 // Toda la lógica (simulación, planificación, semáforo) está en el servidor: aquí solo se dibuja.
 // Entre una foto y la siguiente, las unidades se interpolan siguiendo su camino por las calles,
@@ -52,6 +52,11 @@
   const NOMBRE_TIPO_AV = { 1: 'menor', 2: 'intermedia', 3: 'mayor' };
   const FASES_AV = { EN_LUGAR: 'En el lugar', EN_CENTRAL: 'En el central', FINALIZADA: 'Finalizada' };
   const esTrasvase = (ref) => typeof ref === 'string' && ref.startsWith('TRV-');
+  // v0.4.1: stock de un almacén intermedio en % de su capacidad. Se trunca para que el número coincida con su color
+  // (con el umbral de 30 %, un 29.6 % ya es ámbar y se muestra 29 %).
+  const pctStock = (a) => Math.floor(Math.max(0, Math.min(100, a.stockPct)));
+  const textoStock = (a) => `${a.stock} de ${a.capacidad} paquetes (capacidad máxima)`;
+  const CASA = '<svg viewBox="0 0 24 24" class="casa-mini" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="var(--fondo)" stroke="currentColor" stroke-width="2.4"/><path d="M12 6.5l6 5.2h-1.6V17H7.6v-5.3H6z" fill="currentColor" stroke="none"/></svg>';
   /** Unidad en camino hacia una averiada para el trasvase: su próxima parada es la recogida en ese punto. */
   const vaATrasvasar = (u) => u.estado === 'EN_RUTA' && u.paradas.length > 0
     && u.paradas[0].tipo === 'RECARGA' && esTrasvase(u.paradas[0].ref);
@@ -341,7 +346,7 @@
       ctx.lineTo(px - 6.5, py + 7); ctx.lineTo(px - 6.5, py - 1); ctx.lineTo(px - 9, py - 1); ctx.closePath(); ctx.fill();
       ctx.fillStyle = col.fondo; ctx.fillRect(px - 2, py + 1.5, 4, 5.5);
       // etiqueta
-      const texto = a.central ? a.nombre : `${a.nombre} · ${num(a.stock)}`;
+      const texto = a.central ? a.nombre : `${a.nombre} · ${pctStock(a)}%`;
       ctx.font = '600 12px "Segoe UI", system-ui';
       const w = ctx.measureText(texto).width + 16;
       ctx.fillStyle = hexA(col.superficie, 0.92); ctx.strokeStyle = col.borde; ctx.lineWidth = 1;
@@ -406,24 +411,28 @@
    * Mientras sigue en el lugar la rodea un halo rojo; si hay varias juntas, el distintivo muestra cuántas son.
    */
   function dibujarAveriada(gr, u, px, py, foco) {
+    // v0.4.1: un color por tipo de avería (rúbrica D11), el mismo de la pestaña Averías; rojo si hay tipos distintos
+    const tipos = new Set(gr.unidades.map((x) => x.averia ? x.averia.tipo : 0));
+    const cAv = tipos.size === 1 ? colorTipoAveria([...tipos][0]) : col.rojo;
     const enLugar = gr.unidades.some((x) => x.averia && x.averia.fase === 'EN_LUGAR');
     const latido = enLugar && estado.estado === 'EJECUTANDO' ? (Math.sin(performance.now() / 260) + 1) / 2 : 0;
-    ctx.fillStyle = hexA(col.rojo, enLugar ? 0.14 + 0.12 * latido : 0.1);
+    ctx.fillStyle = hexA(cAv, enLugar ? 0.14 + 0.12 * latido : 0.1);
     ctx.beginPath(); ctx.arc(px, py, (foco ? 19 : 16) + 3 * latido, 0, 7); ctx.fill();
     ctx.fillStyle = hexA(col.fondo, 0.86); ctx.beginPath(); ctx.arc(px, py, foco ? 14 : 11.5, 0, 7); ctx.fill();
-    ctx.strokeStyle = foco ? col.cian : col.rojo; ctx.lineWidth = foco ? 2.2 : 1.6; ctx.stroke();
+    ctx.strokeStyle = foco ? col.cian : cAv; ctx.lineWidth = foco ? 2.2 : 1.6; ctx.stroke();
     glifo(u.tipo, px, py, col['texto-2'], 1, foco ? 1.25 : 1);
     // distintivo relleno con el tipo de avería; con varias averiadas juntas, de contorno y con la cantidad
     const varias = gr.unidades.length > 1;
-    ctx.fillStyle = varias ? col.fondo : col.rojo; ctx.beginPath(); ctx.arc(px + 11, py - 10, 8, 0, 7); ctx.fill();
-    ctx.strokeStyle = varias ? col.rojo : col.fondo; ctx.lineWidth = 1.5; ctx.stroke();
-    ctx.fillStyle = varias ? col.rojo : '#fff'; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center';
+    ctx.fillStyle = varias ? col.fondo : cAv; ctx.beginPath(); ctx.arc(px + 11, py - 10, 8, 0, 7); ctx.fill();
+    ctx.strokeStyle = varias ? cAv : col.fondo; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = varias ? cAv : '#fff'; ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'center';
     ctx.fillText(varias ? String(gr.unidades.length) : String(u.averia ? u.averia.tipo : '!'), px + 11, py - 6.5);
     if (foco && sel && sel.tipo === 'unidad') {
       ctx.font = '600 12px "Cascadia Mono", Consolas, monospace'; ctx.fillStyle = col.texto; ctx.textAlign = 'left';
       ctx.fillText(sel.id, px + 21, py - 12);
     }
   }
+  function colorTipoAveria(tipo) { return tipo === 1 ? col.ambar : tipo === 2 ? col.naranja : col.rojo; }
   function enAlmacen(pos) { return estado.almacenes.some((a) => Math.abs(a.x - pos[0]) < 0.01 && Math.abs(a.y - pos[1]) < 0.01); }
 
   /** Ícono de auto, moto o bicicleta (vista lateral), mirando a la derecha (sentido 1) o a la izquierda (-1). */
@@ -478,6 +487,7 @@
     const chip = $('estado');
     chip.className = 'estado ' + e;
     chip.querySelector('span').textContent = ESTADOS_SIM[e] || e;
+    chip.title = ESTADOS_SIM[e] || e;                 // en pantallas medianas solo se ve el punto de color
 
     $('bloqueLinea').hidden = esColapso();           // v04: el colapso no tiene duración definida
     $('btnDetener').disabled = e !== 'EJECUTANDO';
@@ -503,9 +513,10 @@
     kt.className = 't-' + r.nivelATiempo;
     kt.title = `${num(r.aTiempo)} a tiempo de ${num(r.entregados + r.vencidosSinEntregar)} pedidos que ya debían llegar`;
 
+    // v0.4.1: el central (abastecimiento permanente) va sin dato; los intermedios, con su % de stock
     const htmlAlm = estado.almacenes.map((a) => a.central
-      ? `<li data-id="${a.id}"><i class="p CENTRAL"></i><span>${esc(a.nombre)}</span><span class="stock">ilimitado</span><span></span></li>`
-      : `<li data-id="${a.id}" title="${num(a.stock)} de ${num(a.capacidad)} unidades en stock"><i class="p ${a.nivel}"></i><span>${esc(a.nombre)}</span><span class="stock">${num(a.stock)} u.</span><span class="pct t-${a.nivel}">${Math.round(a.consumoPct)}%</span></li>`).join('');
+      ? `<li data-id="${a.id}" title="Almacén central: abastecimiento permanente">${CASA}<span>${esc(a.nombre)}</span><span></span></li>`
+      : `<li data-id="${a.id}" title="${textoStock(a)}; se recarga a las 23:59:59"><i class="p ${a.nivel}"></i><span>${esc(a.nombre)}</span><span class="pct t-${a.nivel}">${pctStock(a)}%</span></li>`).join('');
     if ($('listaAlmacenes')._html !== htmlAlm) { $('listaAlmacenes').innerHTML = htmlAlm; $('listaAlmacenes')._html = htmlAlm; }
 
     const total = estado.duracionHoras || 120;
@@ -532,7 +543,8 @@
   function actualizarReloj() {
     if (!estado || estado.estado === 'SIN_SIMULACION') {
       $('reloj').textContent = '--/--/---- --:--:--';
-      $('tReal').textContent = 'Real 00:00:00'; $('tHoy').textContent = '';
+      $('tSim').textContent = '--:--:--'; $('tReal').textContent = '00:00:00';
+      $('tHoy').textContent = fmtFecha(new Date());
       return;
     }
     const corre = estado.estado === 'EJECUTANDO';
@@ -540,9 +552,11 @@
     const base = fechaLocal(estado.hora);
     const sim = base ? new Date(base.getTime() + dt * estado.factor * 1000) : null;
     $('reloj').textContent = fmtFecha(sim);
+    const ini = fechaLocal(estado.inicio);          // v0.4.1: tiempo simulado transcurrido (rúbrica C13)
+    $('tSim').textContent = sim && ini ? fmtDur(Math.max(0, (sim - ini) / 1000)) : '--:--:--';
     if ($('modalAveria').open) $('avMomento').textContent = `La avería ocurre en el instante actual de la simulación: ${fmtFecha(sim)}.`;
-    $('tReal').textContent = 'Real ' + fmtDur(estado.segundosReales + dt);
-    $('tHoy').textContent = 'Hoy ' + fmtFecha(new Date());
+    $('tReal').textContent = fmtDur(estado.segundosReales + dt);
+    $('tHoy').textContent = fmtFecha(new Date());
   }
 
   // ================================================================ panel de rastreo de entregas
@@ -710,9 +724,9 @@
       const a = estado.almacenes.find((x) => x.id === sel.id);
       const aqui = averiadasEn(a);
       html = `<h4>${esc(a.nombre)}</h4>
-        <div class="sub">${a.central ? 'Almacén central, permanentemente abastecido' : 'Almacén intermedio, se recarga a 1 000 unidades a las 23:59:59'}</div>
+        <div class="sub">${a.central ? 'Almacén central, permanentemente abastecido' : `Almacén intermedio, se recarga a ${a.capacidad} paquetes a las 23:59:59`}</div>
         <dl><dt>Ubicación</dt><dd>(${a.x}, ${a.y})</dd>
-        ${a.central ? '<dt>Stock</dt><dd>ilimitado</dd>' : `<dt>Stock</dt><dd>${num(a.stock)} / ${num(a.capacidad)}</dd><dt>Consumido</dt><dd class="t-${a.nivel}">${a.consumoPct.toFixed(1)}%</dd>`}
+        ${a.central ? '' : `<dt>Stock</dt><dd class="t-${a.nivel}">${pctStock(a)}% · ${a.stock} de ${a.capacidad} paquetes</dd>`}
         <dt>Vienen a recargar</dt><dd>${a.recargan.length ? a.recargan.join(', ') : '—'}</dd>
         ${aqui.length ? `<dt>Averiadas aquí</dt><dd class="t-ROJO">${aqui.map((u) => `${u.id} (tipo ${u.averia.tipo})`).join(', ')}</dd>` : ''}</dl>`;
     } else if (sel.tipo === 'pedido') {
@@ -772,7 +786,7 @@
   }
   function filasAveria(av) {
     let f = `<dt>Avería</dt><dd class="t-ROJO">Tipo ${av.tipo} (${NOMBRE_TIPO_AV[av.tipo]})</dd>
-      <dt>Ocurrió</dt><dd>${fmtCorta(av.inicio)} · ${av.origen === 'ARCHIVO' ? 'programada' : 'registrada'}</dd>
+      <dt>Ocurrió</dt><dd>${fmtCorta(av.inicio)} · registrada</dd>
       <dt>Lugar</dt><dd>(${av.x.toFixed(1)}, ${av.y.toFixed(1)})</dd>`;
     if (av.tipo > 1) f += `<dt>En el lugar hasta</dt><dd>${fmtCorta(av.finLugar)}</dd>`;
     f += `<dt>Disponible desde</dt><dd>${fmtCorta(av.disponible)}</dd>`;
@@ -861,7 +875,7 @@
       terminadas.forEach((a) => filas.push({ clave: a.id, clase: 'averia fin t' + a.tipo, unidad: a.unidad, html: htmlAveria(a) }));
     }
     if (!todas.length) filas.push({ clave: 'nada', clase: 'lista-vacia', html: estado && estado.unidades
-      ? `Sin averías por ahora.${reglas && estado.escenario !== 'DIA_A_DIA' ? ' Las programadas en datos/averias.aaaamm.txt aparecen aquí al ocurrir.' : ''}` : 'Inicia una simulación para registrar averías.' });
+      ? 'Sin averías por ahora. Regístralas con el botón Registrar avería.' : 'Inicia una simulación para registrar averías.' });
 
     const ul = $('listaAverias');
     const vistos = new Set();
@@ -946,7 +960,7 @@
   $('btnNuevaAveria').onclick = () => abrirRegistroAveria(sel && sel.tipo === 'unidad' ? sel.id : null);
   $('btnAveriarUnidad').onclick = (ev) => abrirRegistroAveria(ev.currentTarget.dataset.unidad);
 
-  /** Avisos de las averías que ocurren (archivo o en otro dispositivo), de los traslados, trasvases y retornos. */
+  /** Avisos de las averías que ocurren (registradas en otro dispositivo), de los traslados, trasvases y retornos. */
   function avisosAverias(prev) {
     if (!prev || !prev.averias || !estado.averias || prev.inicio !== estado.inicio || prev.escenario !== estado.escenario) return;
     const antes = new Map(prev.averias.map((a) => [a.id, a]));
@@ -954,7 +968,7 @@
       const p = antes.get(a.id);
       if (!p) {
         if (!propias.has(a.id)) {
-          avisar(`Avería tipo ${a.tipo} en ${a.unidad}${a.origen === 'ARCHIVO' ? ' (programada)' : ''}: `
+          avisar(`Avería tipo ${a.tipo} en ${a.unidad}: `
             + (a.pedidos.length ? `${pedidosReplanificados(a.pedidos.length)}.` : 'no tenía pedidos asignados.'), 'error');
         }
         continue;
@@ -1013,7 +1027,7 @@
     if (o.tipo === 'almacen') {
       const a = estado.almacenes.find((x) => x.id === o.id);
       const aqui = averiadasEn(a);
-      return `<b>${esc(a.nombre)}</b><br><span>${a.central ? 'Stock ilimitado' : `Stock ${num(a.stock)} de ${num(a.capacidad)} · ${Math.round(a.consumoPct)}% consumido`}</span>`
+      return `<b>${esc(a.nombre)}</b><br><span>${a.central ? 'Abastecimiento permanente' : `Stock ${pctStock(a)}% · ${textoStock(a)}`}</span>`
         + `<br><span>Vienen a recargar: ${a.recargan.length ? a.recargan.slice(0, 8).join(', ') + (a.recargan.length > 8 ? '…' : '') : 'ninguna'}</span>`
         + (aqui.length ? `<br><span class="t-ROJO">Averiadas aquí: ${aqui.map((u) => `${u.id} (tipo ${u.averia.tipo})`).join(', ')}</span>` : '');
     }
@@ -1272,6 +1286,11 @@
 
   fetch('/api/config').then((r) => r.json()).then((c) => {
     if (!$('fecha').value) $('fecha').value = `${c.fechaInicio}T${c.horaInicio || '00:00'}`;
+    if (c.stockVerde !== undefined) {           // v0.4.1: leyenda del semáforo de stock con los umbrales configurados
+      $('lsVerde').textContent = `desde ${c.stockVerde}%`;
+      $('lsAmbar').textContent = `desde ${c.stockAmbar}%`;
+      $('lsRojo').textContent = `menos de ${c.stockAmbar}%`;
+    }
     if (c.averiaTipo1Horas !== undefined) {
       cfgAveria = { tipo1Horas: c.averiaTipo1Horas, enLugarHoras: c.averiaEnLugarHoras, tipo3Dias: c.averiaTipo3Dias,
         tipo3Hora: c.averiaTipo3Hora, trasvaseMin: c.averiaTrasvaseMinutos };
@@ -1306,6 +1325,7 @@
       const chip = $('estado');
       chip.className = 'estado desconectado';
       chip.querySelector('span').textContent = 'Sin conexión';
+      chip.title = 'Sin conexión';
     };
   }
 
