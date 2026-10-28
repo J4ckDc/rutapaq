@@ -21,14 +21,13 @@ public final class Averia {
     /** EN_LUGAR: detenida donde se averió. EN_CENTRAL: tipos 2 y 3 ya llevados al almacén central. FINALIZADA: vuelve a operar. */
     public enum Fase { EN_LUGAR, EN_CENTRAL, FINALIZADA }
 
-    public static final String VISUALIZADOR = "VISUALIZADOR";
-    public static final String ARCHIVO = "ARCHIVO";
+    public static final String VISUALIZADOR = "VISUALIZADOR";   // v0.4.1: las averías solo se registran de forma manual
 
     public final String id;
     public final String unidad;
     public final TipoUnidad tipoUnidad;
     public final int tipo;
-    public final String origen;          // VISUALIZADOR o ARCHIVO
+    public final String origen;          // VISUALIZADOR
     public final double inicio;          // momento de ocurrencia
     public final double x;               // posición exacta en la que quedó detenida
     public final double y;

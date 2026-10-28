@@ -15,8 +15,8 @@ import pe.pucp.paqrap.app.modelo.Nodo;
 
 /**
  * v04: simulación hasta el colapso. Al colapsar se guarda el reporte (criterio, instante, Tc, pedido involucrado y
- * estado de la flota); si se acaban los datos sin que nada venza, termina sin colapso; y las averías programadas del
- * archivo no se usan en este escenario salvo averia.archivo.colapso=true.
+ * estado de la flota); si se acaban los datos sin que nada venza, termina sin colapso. v0.4.1: las averías no se
+ * leen de archivo en ningún escenario, solo se registran desde el visualizador (también en el colapso).
  */
 class ColapsoTest {
 
@@ -68,21 +68,18 @@ class ColapsoTest {
     }
 
     @Test
-    void lasAveriasDelArchivoNoSeUsanEnElColapsoSalvoQueSeConfigure() throws IOException {
+    void enElColapsoLasAveriasSoloSeRegistranDesdeElVisualizador() throws IOException {
         carpeta = Files.createTempDirectory("rutapaq-colapso");
-        Files.writeString(carpeta.resolve("averias.202601.txt"), "01d01h00m:TA01,1\n");
+        Files.writeString(carpeta.resolve("averias.202601.txt"), "01d01h00m:TA01,1\n");   // ya no se lee
         LocalDateTime inicio = LocalDateTime.of(2026, 1, 1, 0, 0);
-
+        for (Simulacion.Escenario e : new Simulacion.Escenario[]{Simulacion.Escenario.COLAPSO, Simulacion.Escenario.SEMANAL}) {
+            Simulacion s = nueva(e, inicio, "averia.archivo.colapso=true\naveria.archivo.habilitado=true\n");
+            s.avanzar(2 * 3600);
+            assertEquals(0, s.averias().size(), e + ": el archivo no genera averías");
+        }
         Simulacion colapso = nueva(Simulacion.Escenario.COLAPSO, inicio, "");
-        colapso.avanzar(2 * 3600);
-        assertEquals(0, colapso.averias().size(), "colapso: sin averías del archivo");
-
-        Simulacion cincoDias = nueva(Simulacion.Escenario.SEMANAL, inicio, "");
-        cincoDias.avanzar(2 * 3600);
-        assertEquals(1, cincoDias.averias().size(), "5 días: con averías del archivo");
-
-        Simulacion conArchivo = nueva(Simulacion.Escenario.COLAPSO, inicio, "averia.archivo.colapso=true\n");
-        conArchivo.avanzar(2 * 3600);
-        assertEquals(1, conArchivo.averias().size(), "colapso con averia.archivo.colapso=true");
+        colapso.avanzar(60);
+        colapso.registrarAveria("TA01", 2);
+        assertEquals(1, colapso.averias().size(), "el registro desde el visualizador funciona en el colapso");
     }
 }

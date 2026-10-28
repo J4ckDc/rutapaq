@@ -1,16 +1,40 @@
-# RUTAPAQ v04: servidor, simulación y visualizador con rutapaq-planner (ALNS y GA)
+# RUTAPAQ v0.4.1: servidor, simulación y visualizador con rutapaq-planner (ALNS y GA)
 
 Un solo proceso Java 17 **sin dependencias en ejecución**. Contiene el código de
 **rutapaq-planner v2.0** (`pe.pucp.paqrap.planner`: ALNS_PAQRAP, HGS_PAQRAP, EvaluadorItinerario y
 el banco del IEN) y, alrededor de él, la simulación y el visualizador web (`pe.pucp.paqrap.app`).
 
 Alcance de la v03: sobre la **simulación de 5 días** de la v02 se agregan las **averías** de las unidades
-(tipos 1, 2 y 3), con registro desde el visualizador, averías programadas por archivo, trasvase de paquetes,
+(tipos 1, 2 y 3), con registro manual desde el visualizador, trasvase de paquetes,
 traslado al almacén central y replanificación inmediata. El servidor ya aplica las averías en los tres
 escenarios.
 
 Alcance de la v04: la **simulación hasta el colapso** en el visualizador. La operación día a día sigue pendiente
 en la interfaz.
+
+Alcance de la v0.4.1: averías solo manuales (indicación del profesor) y ajustes de la interfaz pedidos en la
+revisión (tiempos de la barra superior, stock de los almacenes en %, color por tipo de avería y menú en español).
+
+## Cambios de la v0.4.1 respecto de la v04
+
+Une la v04 (simulación hasta el colapso y correcciones) con los ajustes hechos en paralelo sobre la v03:
+
+| # | Cambio | Dónde |
+|---|---|---|
+| 1 | Por indicación del profesor, las averías **solo se ingresan de forma manual** desde el visualizador (botón **Registrar avería**). Se quitan la lectura de `datos/averias.aaaamm.txt`, los 36 archivos de prueba, el comando `generar-averias` y la clave `averia.archivo.habilitado`. | `Simulacion`, `ReglasAveria`, `app/datos`, `App`, `config.properties`, `datos/` |
+| 2 | Mapa: el distintivo y el halo de una unidad averiada usan **un color por tipo** (1 ámbar, 2 naranja, 3 rojo), igual que la pestaña Averías. | `app.js` (`dibujarAveriada`), leyenda |
+| 3 | Barra superior: los **4 tiempos con su etiqueta**, en 2 filas: fecha y hora de simulación y duración de simulación (tiempo simulado transcurrido, nuevo); hoy (fecha y hora actual) y tiempo real transcurrido. Todos con segundos (Eval-4D C12 a C16; P&R hoja Guía, ítems 35 a 39). Antes la hora actual se ocultaba en pantallas de menos de 1500 px y en el celular; ahora los 4 tiempos se ven en cualquier ancho: en pantallas medianas se usan etiquetas cortas y se compactan los demás elementos (menú lateral, textos de los botones, indicadores y estado), y si aun así no caben, la barra pasa a 2 filas en vez de desbordarse. | `index.html`, `estilos.css`, `app.js` (`actualizarReloj`) |
+| 4 | Menú lateral: "Dashboard" pasa a **"Tablero"**, para que toda la interfaz esté en español. | `index.html` |
+| 5 | Inventario de almacenes: los intermedios muestran su **stock en %** de la capacidad máxima (panel, etiqueta del mapa, tooltip y detalle; al pasar el mouse, por ejemplo "250 de 1000 paquetes"). El semáforo pasa a medirse sobre el stock (`semaforo.almacen.verde=30`, `semaforo.almacen.ambar=10`: verde desde 30 %, ámbar desde 10 %, rojo por debajo), que equivale a los umbrales anteriores de consumo (70 % y 90 %). El almacén central se muestra con su ícono y sin dato, porque tiene abastecimiento permanente. | `Simulacion.snapshotJson()`, `Servidor` (`/api/config`), `index.html`, `estilos.css`, `app.js`, `config.properties` |
+| 6 | Pruebas: se quitan las 2 del archivo de averías y se agrega una que verifica que un archivo en `datos/` ya no genera averías y que el registro manual sigue funcionando. | `AveriasTest` |
+| 7 | Colapso: como las averías ya no se leen de archivo, se quita la clave `averia.archivo.colapso` de la v04 y su prueba pasa a verificar que en el colapso el archivo no genera averías y que el registro desde el visualizador funciona. | `Simulacion`, `config.properties`, `ColapsoTest` |
+
+Verificación: las 38 pruebas pasan (15 del planificador, 16 de averías y trasvase, 3 del colapso y 4 de las
+correcciones). Sin averías registradas, los 5 días desde el 01/01/2026 dan lo mismo que la v02, la v03 y la v04
+(76 pedidos recibidos, 74 entregados, S/ 10 184). Colapso desde el 01/03/2027 sin interfaz: criterio P a las 143,7 h.
+En el navegador: colapso forzado (reporte, alerta fija, etiqueta Colapso y mapa centrado en el pedido), simulación de
+5 días completa con su resumen, registro de averías y trasvase, inventario en %, y la barra superior en anchos de
+360 a 1920 px.
 
 ## Cambios de la v04 respecto de la v03: simulación hasta el colapso
 
@@ -24,7 +48,7 @@ Es la misma pantalla del Simulador de Rutas: en la barra superior se elige **Col
 | 3 | **Colapso**: cuando un pedido llega a su límite sin ser entregado (criterio P) o cuando una ejecución del planificador tarda `ien.saSegundos` o más (criterio C), la simulación se detiene. Se guarda el **reporte del colapso** tal como estaba en ese instante: criterio, fecha y hora simulada, Tc, pedido involucrado (cliente, ubicación, cantidad y entregado, plazo, registro, límite y unidad que lo llevaba) y estado de la flota (en ruta, disponibles, en mantenimiento y averiadas por tipo). | `Simulacion.colapso()`, campos `colapso` y `tipoFin` del estado |
 | 4 | Al colapsar, la etiqueta de estado muestra **Colapso** en rojo, aparece una **alerta roja que no se cierra sola** (con *Ver reporte*), se abre el reporte con los indicadores acumulados y el mapa queda centrado en el pedido involucrado. | `resources/web/` |
 | 5 | **Fin sin colapso**: si se acaban los datos de ventas de la carpeta y ya se entregó todo lo pendiente, termina con "Sin colapso…" y el resumen de indicadores. Si un pedido vence antes, eso ya es colapso. | `Simulacion.paso()`, `FuenteDatos.finDeVentas()` |
-| 6 | Las averías programadas del archivo (`averias.aaaamm.txt`, de prueba, generadas por el equipo) **no se usan en el colapso**; se vuelven a activar con `averia.archivo.colapso=true`. En los 5 días siguen como antes. Las averías registradas desde el visualizador funcionan en ambos. | `Simulacion`, `config.properties` |
+| 6 | (Retirado en la v0.4.1, donde las averías ya no se leen de archivo) Las averías programadas del archivo (`averias.aaaamm.txt`, de prueba, generadas por el equipo) **no se usan en el colapso**; se vuelven a activar con `averia.archivo.colapso=true`. En los 5 días siguen como antes. Las averías registradas desde el visualizador funcionan en ambos. | `Simulacion`, `config.properties` |
 | 7 | 3 pruebas nuevas: reporte del colapso con el pedido y la flota, fin sin colapso al acabarse los datos, y averías del archivo solo en el colapso si se configura. | `src/test/java/.../app/sim/ColapsoTest.java` |
 
 Velocidad: `escenario.colapso.factor` (600 por defecto: 1 día simulado dura unos 2,4 minutos reales); se fija antes
@@ -43,7 +67,7 @@ enero de 2026.
 | 2 | Al ocurrir, la unidad queda **detenida en su posición exacta** (la calle no se bloquea), sus pedidos vuelven al planificador y se ejecuta un **ciclo de planificación extraordinario** en ese momento (también si la simulación está detenida). | `Simulacion.averiar()` |
 | 3 | Reglas de la P&R (pregunta 3): tipo 1 no disponible 2 h en el lugar y con su carga; tipos 2 y 3 permanecen 4 h en el lugar y luego pasan de forma instantánea al almacén central con los paquetes no trasvasados; el tipo 2 vuelve al final del turno siguiente y el tipo 3 tras al menos 2 días, al inicio del turno de 15:00. Todos los valores se configuran (`averia.*`). | `app/sim/ReglasAveria.java`, `app/modelo/Averia.java` |
 | 4 | **Trasvase** (tipos 2 y 3): mientras sigue en el lugar, la unidad averiada se entrega al planificador como un depósito temporal (`TipoAlmacen.TRASVASE`) con sus paquetes, una hora de cierre (cuando la llevan al central) y 30 min de atención. Otra unidad puede ir a recoger los paquetes si alcanza a terminar antes del cierre. Con los almacenes del caso el planificador da los mismos resultados que en la v02. | `planner/model/Almacen.java`, `planner/core/EvaluadorItinerario.recargar()`, `DatosPlanificacion` |
-| 5 | Averías programadas para los escenarios de 5 días y colapso: archivo mensual `datos/averias.aaaamm.txt` (formato definido por el equipo, ver abajo) y comando `generar-averias` para crear archivos de prueba. `datos/` trae archivos de prueba de ene-2026 a dic-2028 (2 averías por día). | `app/datos/Formato.java`, `FuenteDatos.java`, `GeneradorDatos.java` |
+| 5 | (Retirado en la v0.4.1) Averías programadas para los escenarios de 5 días y colapso: archivo mensual `datos/averias.aaaamm.txt` (formato definido por el equipo) y comando `generar-averias` para crear archivos de prueba. `datos/` trae archivos de prueba de ene-2026 a dic-2028 (2 averías por día). | `app/datos/Formato.java`, `FuenteDatos.java`, `GeneradorDatos.java` |
 | 6 | Mapa: la unidad averiada se dibuja detenida con un **distintivo rojo con el tipo** (1, 2 o 3) y un halo rojo mientras sigue en el lugar; las que ya están en el almacén central se dibujan junto a su ícono. Al pasar el mouse: tipo, hora de ocurrencia y tiempo de indisponibilidad. Las unidades que hacen un trasvase se ven con un anillo naranja y la parada **T** en su itinerario. | `resources/web/app.js` |
 | 7 | Panel derecho con pestañas **Pedidos** y **Averías**: lista de unidades averiadas por tipo (1, 2 y 3) con su fase, tiempo restante y paquetes por trasvasar, e historial de las averías terminadas (duración, pedidos replanificados, trasvasados y devueltos). Al elegir una, el mapa se centra en ella (del panel al mapa). | `resources/web/` |
 | 8 | Detalle de la unidad con la avería vigente (ocurrencia, lugar, fin en el lugar, disponibilidad, trasvases, pedidos replanificados) y el periodo de indisponibilidad también en mantenimiento. Avisos emergentes al ocurrir una avería, al trasvasar, al pasar al central y al volver a operar. Panel izquierdo con las averiadas por tipo y resumen final con averías, trasvasados y devueltos. | `resources/web/` |
@@ -116,12 +140,6 @@ java -jar rutapaq.jar probar 2026-01-01 120            # 5 días
 java -jar rutapaq.jar probar 2027-03-01 240 COLAPSO    # hasta el colapso (o 240 h)
 ```
 
-Archivos de averías programadas de prueba (v03):
-
-```bash
-java -jar rutapaq.jar generar-averias datos 202601 202812 2 7   # meses, averías por día, semilla
-```
-
 El banco experimental del IEN sigue funcionando igual desde el mismo jar:
 
 ```bash
@@ -186,19 +204,14 @@ Registro en línea (lo usa el visualizador): `POST /api/averias?unidad=TA03&tipo
 un error (400 datos inválidos, 409 unidad ya averiada, en mantenimiento o sin simulación en curso).
 `GET /api/averias` devuelve el historial de averías del escenario.
 
-Averías programadas (5 días y colapso), un archivo por mes en `datos/`: `averias.aaaamm.txt`, registro
-`##d##h##m:TTNN,tipo`, por ejemplo `05d10h20m:TA03,2`. El curso aún no publica el formato ni las reglas de
-generación ("se tendrán reglas de generación", P&R pregunta 3), así que este formato lo define el equipo y se lee
-en `Formato.averia()`; si el curso publica otro, solo cambia ese método. Un registro se omite (y se informa en
-consola) si la unidad no existe, ya está averiada o está en mantenimiento en ese instante. Para simular sin
-averías programadas: `averia.archivo.habilitado=false`.
+Las averías solo se registran de forma manual desde el visualizador (v0.4.1); no se leen de ningún archivo.
 
 ## Configuración
 
 | Archivo | Qué contiene |
 |---|---|
 | `planner.properties` (de rutapaq-planner, sin cambios) | Mapa, almacenes, flota, Sc, Sa, P, parámetros de ALNS y GA |
-| `config.properties` | Servidor, algoritmo, escenarios (fecha y hora propuestas, duración del 5D), averías (`averia.tipo1.horas`, `averia.enLugar.horas`, `averia.tipo3.diasMinimos`, `averia.tipo3.horaRetorno`, `averia.trasvase.*`, `averia.archivo.habilitado`, `averia.archivo.colapso`), frecuencia de publicación y semáforo (`semaforo.plazo.*`, `semaforo.almacen.*`, `semaforo.carga.*`, `semaforo.pedido.*`) |
+| `config.properties` | Servidor, algoritmo, escenarios (fecha y hora propuestas, duración del 5D), averías (`averia.tipo1.horas`, `averia.enLugar.horas`, `averia.tipo3.diasMinimos`, `averia.tipo3.horaRetorno`, `averia.trasvase.*`), frecuencia de publicación y semáforo (`semaforo.plazo.*`, `semaforo.almacen.*`, `semaforo.carga.*`, `semaforo.pedido.*`) |
 
 Un `config.properties` junto al jar sobrescribe cualquier clave de los dos archivos, sin recompilar.
 
@@ -212,7 +225,7 @@ Un `config.properties` junto al jar sobrescribe cualquier clave de los dos archi
 | `app.sim.Caminos` | Caminos nodo a nodo sobre la `MapaReticula` del planner |
 | `app.sim.Planificadores` | Crea `ALNS_PAQRAP` o `HGS_PAQRAP` según la configuración |
 | `app.sim.Indicadores` | Semáforo con umbrales configurables |
-| `app.datos` | Lectura de ventas, bloqueos y averías programadas línea por línea, y plan de mantenimiento |
+| `app.datos` | Lectura de ventas y bloqueos línea por línea, y plan de mantenimiento |
 | `app.web.Servidor` | REST, SSE y archivos del visualizador |
 | `resources/web` | Visualizador (Canvas 2D + EventSource) |
 
