@@ -2,6 +2,7 @@ package pe.pucp.paqrap.app.web;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import pe.pucp.paqrap.app.CatalogoConfiguracion;
 import pe.pucp.paqrap.app.Config;
 import pe.pucp.paqrap.app.modelo.Averia;
 import pe.pucp.paqrap.app.modelo.Nodo;
@@ -19,6 +20,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -38,6 +40,11 @@ import java.util.concurrent.TimeUnit;
  *   POST /api/averias?unidad=TA03&tipo=2                                       registra una avería (v03)
  *   GET  /api/averias                                                          historial de averías del escenario (v03)
  *   GET  /api/config                                                           datos para la interfaz
+ *   GET  /api/plan                                                             v0.5: última planificación estable (JSON)
+ *   GET  /api/plan.csv                                                         v0.5: la misma, en CSV
+ *   GET  /api/configuracion                                                    v0.5: parámetros editables (B01, B02, B04, B06-B09)
+ *   POST /api/configuracion?clave=valor&...                                    v0.5: valida, guarda en config.properties y aplica
+ *   POST /api/configuracion/restaurar                                          v0.5: vuelve a los valores de fábrica
  *   GET  /                                                                     visualizador
  */
 public final class Servidor {
@@ -67,6 +74,10 @@ public final class Servidor {
         s.createContext("/api/pedidos", this::pedido);
         s.createContext("/api/averias", this::averias);
         s.createContext("/api/config", this::config);
+        s.createContext("/api/plan", this::plan);                 // v0.5: última planificación estable (JSON)
+        s.createContext("/api/configuracion", this::configuracion);                    // v0.5: pantalla Configuración
+        s.createContext("/api/configuracion/restaurar", this::restaurarConfiguracion);  // v0.5: valores de fábrica
+        s.createContext("/api/plan.csv", this::planCsv);          // v0.5: la misma, en CSV
         s.createContext("/", this::estatico);
         s.setExecutor(Executors.newCachedThreadPool());
         s.start();
@@ -83,7 +94,7 @@ public final class Servidor {
 
     private String estadoJson() {
         Simulacion s = sim;
-        return s == null ? "{\"estado\":\"SIN_SIMULACION\"}" : s.snapshotJson();
+        return s == null ? "{\"estado\":\"SIN_SIMULACION\",\"configVersion\":" + cfg.version() + "}" : s.snapshotJson();
     }
 
     // ---------------------------------------------------------------- SSE
@@ -156,7 +167,16 @@ public final class Servidor {
                     Thread.currentThread().interrupt();
                 }
             }
-            sim = new Simulacion(cfg, esc, inicio, crearPlanificador());
+            // v0.5: capacidad, velocidad y costo de la flota con los valores guardados (la flota cambia solo al inicio)
+            pe.pucp.paqrap.planner.model.TipoVehiculo.configurar(cfg.planificador());
+            try {
+                sim = new Simulacion(cfg, esc, inicio, crearPlanificador());
+            } catch (IllegalArgumentException e) {      // v0.5 (B01): p. ej. un almacén fuera del mapa configurado
+                sim = null;
+                hilo = null;
+                responder(ex, 400, "application/json", "{\"error\":" + Json.str(e.getMessage()) + "}");
+                return;
+            }
             hilo = new Thread(sim, "simulacion");
             hilo.setDaemon(true);
             hilo.start();
@@ -199,12 +219,13 @@ public final class Servidor {
             int x = Integer.parseInt(q.get("x")), y = Integer.parseInt(q.get("y"));
             int cantidad = Integer.parseInt(q.get("cantidad")), plazo = Integer.parseInt(q.get("plazo"));
             if (!PLAZOS.contains(plazo)) throw new IllegalArgumentException("plazo");
-            if (x < 0 || x > 70 || y < 0 || y > 50 || cantidad <= 0) throw new IllegalArgumentException("datos");
+            // v0.5 (B01): límites según el mapa de la simulación en curso (ien.mapaAnchoKm x ien.mapaAltoKm)
+            if (x < 0 || x > s.anchoMapa() || y < 0 || y > s.altoMapa() || cantidad <= 0) throw new IllegalArgumentException("datos");
             String id = s.registrarPedido(q.getOrDefault("cliente", "c-web"), new Nodo(x, y), cantidad, plazo);
             responder(ex, 200, "application/json", "{\"id\":" + Json.str(id) + "}");
         } catch (RuntimeException e) {
-            responder(ex, 400, "application/json",
-                    "{\"error\":\"datos inválidos: x 0-70, y 0-50, cantidad > 0, plazo 4/8/12/18/36\"}");
+            responder(ex, 400, "application/json", "{\"error\":" + Json.str("datos inválidos: x 0-" + s.anchoMapa()
+                    + ", y 0-" + s.altoMapa() + ", cantidad > 0, plazo 4/8/12/18/36") + "}");
         }
     }
 
@@ -256,7 +277,152 @@ public final class Servidor {
                 + ",\"averiaTipo3Hora\":" + Json.str(cfg.texto("averia.tipo3.horaRetorno", "15:00"))
                 + ",\"averiaTrasvaseMinutos\":" + Json.num(cfg.decimal("averia.trasvase.minutos", 30))
                 + ",\"stockVerde\":" + Json.num(cfg.decimal("semaforo.almacen.verde", 30))
-                + ",\"stockAmbar\":" + Json.num(cfg.decimal("semaforo.almacen.ambar", 10)) + "}");
+                + ",\"stockAmbar\":" + Json.num(cfg.decimal("semaforo.almacen.ambar", 10))
+                + ",\"ventanaHoras\":" + Json.num(cfg.decimal("panel.ventanaHoras", 4))
+                // v0.5 (B01): tamaño del mapa (el visualizador dibuja la retícula con estos valores)
+                + ",\"mapa\":{\"ancho\":" + cfg.entero("ien.mapaAnchoKm", 70) + ",\"alto\":" + cfg.entero("ien.mapaAltoKm", 50) + "}"
+                + ",\"configVersion\":" + cfg.version()
+                // v0.5: todos los umbrales del semáforo, para que las leyendas coincidan con la configuración
+                + ",\"semaforo\":" + new pe.pucp.paqrap.app.sim.Indicadores(cfg).umbralesJson() + "}");
+    }
+
+    // ---------------------------------------------------------------- v0.5: pantalla Configuración
+
+    private void configuracion(HttpExchange ex) throws IOException {
+        if (ex.getRequestMethod().equals("GET")) {
+            Map<String, String> defecto = new HashMap<>();
+            for (CatalogoConfiguracion.Campo c : CatalogoConfiguracion.CAMPOS) defecto.put(c.clave(), vigente(c, cfg.deFabrica(c.clave())));
+            Simulacion s = sim;
+            responder(ex, 200, "application/json", CatalogoConfiguracion.json(vigentes(), defecto, cfg.version(),
+                    s == null ? "SIN_SIMULACION" : s.estado().name()));
+            return;
+        }
+        if (!ex.getRequestMethod().equals("POST")) {
+            responder(ex, 405, "text/plain", "Use GET o POST");
+            return;
+        }
+        guardarConfiguracion(ex, parametros(ex));
+    }
+
+    private void restaurarConfiguracion(HttpExchange ex) throws IOException {
+        if (!ex.getRequestMethod().equals("POST")) {
+            responder(ex, 405, "text/plain", "Use POST");
+            return;
+        }
+        Map<String, String> fabrica = new LinkedHashMap<>();
+        for (CatalogoConfiguracion.Campo c : CatalogoConfiguracion.CAMPOS) {
+            String v = cfg.deFabrica(c.clave());
+            if (v != null) fabrica.put(c.clave(), v);
+        }
+        guardarConfiguracion(ex, fabrica);
+    }
+
+    /** Valor vigente de un campo, normalizado como lo muestra la pantalla. */
+    private String vigente(CatalogoConfiguracion.Campo c, String crudo) {
+        try {
+            return CatalogoConfiguracion.normalizar(c, crudo, cfg.entero("ien.mapaAnchoKm", 70), cfg.entero("ien.mapaAltoKm", 50));
+        } catch (RuntimeException e) {
+            return crudo == null ? "" : crudo.trim();
+        }
+    }
+
+    private Map<String, String> vigentes() {
+        Map<String, String> m = new LinkedHashMap<>();
+        for (CatalogoConfiguracion.Campo c : CatalogoConfiguracion.CAMPOS) m.put(c.clave(), vigente(c, cfg.texto(c.clave(), "")));
+        return m;
+    }
+
+    /**
+     * Valida todos los valores recibidos (cada uno y en conjunto), guarda en config.properties solo los que cambiaron
+     * y aplica: velocidades en el siguiente ciclo de la simulación en curso, reglas de averías y semáforo de inmediato;
+     * el resto rige al iniciar la próxima simulación. Responde qué se aplicó y cuándo, o los errores por campo.
+     */
+    private synchronized void guardarConfiguracion(HttpExchange ex, Map<String, String> entrada) throws IOException {
+        Map<String, String> resultantes = vigentes();
+        // v0.5 (B01): las ubicaciones de los almacenes se revisan contra el tamaño del mapa que quedaría (validarConjunto);
+        // aquí solo se exige que estén dentro del máximo permitido para el mapa
+        int ancho = (int) CatalogoConfiguracion.campo("ien.mapaAnchoKm").max(), alto = (int) CatalogoConfiguracion.campo("ien.mapaAltoKm").max();
+        Map<String, String> cambios = new LinkedHashMap<>();
+        Map<String, String> errores = new LinkedHashMap<>();
+        for (Map.Entry<String, String> e : entrada.entrySet()) {
+            CatalogoConfiguracion.Campo c = CatalogoConfiguracion.campo(e.getKey());
+            if (c == null) continue;                              // solo se aceptan las claves de la pantalla
+            try {
+                String v = CatalogoConfiguracion.normalizar(c, e.getValue(), ancho, alto);
+                if (!v.equals(resultantes.get(c.clave()))) cambios.put(c.clave(), v);
+                resultantes.put(c.clave(), v);
+            } catch (IllegalArgumentException err) {
+                errores.put(c.clave(), err.getMessage());
+            }
+        }
+        if (errores.isEmpty()) errores.putAll(CatalogoConfiguracion.validarConjunto(resultantes));
+        if (!errores.isEmpty()) {
+            StringBuilder b = new StringBuilder("{\"errores\":{");
+            boolean primero = true;
+            for (Map.Entry<String, String> e : errores.entrySet()) {
+                if (!primero) b.append(',');
+                b.append(Json.str(e.getKey())).append(':').append(Json.str(e.getValue()));
+                primero = false;
+            }
+            responder(ex, 400, "application/json", b.append("}}").toString());
+            return;
+        }
+        try {
+            cfg.guardar(cambios);
+        } catch (IOException e) {
+            responder(ex, 500, "application/json", "{\"error\":" + Json.str("No se pudo escribir " + cfg.archivo() + ": " + e.getMessage()) + "}");
+            return;
+        }
+        Simulacion s = sim;
+        boolean enCurso = s != null && (s.estado() == Simulacion.Estado.EJECUTANDO || s.estado() == Simulacion.Estado.PAUSADA
+                || s.estado() == Simulacion.Estado.PREPARADA);
+        Map<pe.pucp.paqrap.planner.model.TipoVehiculo, Double> velocidades = new java.util.EnumMap<>(pe.pucp.paqrap.planner.model.TipoVehiculo.class);
+        boolean averias = false;
+        Map<CatalogoConfiguracion.Aplica, List<String>> porCuando = new java.util.EnumMap<>(CatalogoConfiguracion.Aplica.class);
+        for (String k : cambios.keySet()) {
+            CatalogoConfiguracion.Campo c = CatalogoConfiguracion.campo(k);
+            porCuando.computeIfAbsent(c.aplica(), x -> new java.util.ArrayList<>())
+                    .add((c.grupo() != null ? c.grupo() : CatalogoConfiguracion.SECCIONES.stream()
+                            .filter(x -> x.id().equals(c.seccion())).findFirst().map(CatalogoConfiguracion.Seccion::titulo).orElse(""))
+                            + " · " + c.etiqueta());
+            if (k.endsWith(".velocidadKmh")) {
+                String tipo = k.substring("flota.".length(), k.length() - ".velocidadKmh".length()).toUpperCase();
+                velocidades.put(pe.pucp.paqrap.planner.model.TipoVehiculo.valueOf(tipo), Double.parseDouble(cambios.get(k)));
+            }
+            if (k.startsWith("averia.")) averias = true;
+        }
+        if (!velocidades.isEmpty()) {
+            if (enCurso) s.programarVelocidades(velocidades);
+            else velocidades.forEach(pe.pucp.paqrap.planner.model.TipoVehiculo::setVelocidadKmH);
+        }
+        if (averias && s != null) s.recargarReglasAveria();
+        System.out.printf("Configuración guardada en %s: %s%n", cfg.archivo(), cambios);
+        StringBuilder b = new StringBuilder("{\"ok\":true,\"cambios\":").append(cambios.size())
+                .append(",\"simulacionEnCurso\":").append(enCurso).append(",\"archivo\":").append(Json.str(String.valueOf(cfg.archivo())));
+        for (CatalogoConfiguracion.Aplica a : CatalogoConfiguracion.Aplica.values()) {
+            b.append(",\"").append(a.name().toLowerCase()).append("\":[");
+            List<String> l = porCuando.getOrDefault(a, List.of());
+            for (int i = 0; i < l.size(); i++) b.append(i > 0 ? "," : "").append(Json.str(l.get(i)));
+            b.append(']');
+        }
+        responder(ex, 200, "application/json", b.append('}').toString());
+    }
+
+    /** v0.5: última planificación estable de la simulación en curso o terminada (rúbrica G08 a G10). */
+    private void plan(HttpExchange ex) throws IOException {
+        Simulacion s = sim;
+        responder(ex, 200, "application/json", s == null ? "{\"plan\":null}" : s.planJson());
+    }
+
+    private void planCsv(HttpExchange ex) throws IOException {
+        Simulacion s = sim;
+        String csv = s == null ? null : s.planCsv();
+        if (csv == null) {
+            responder(ex, 404, "text/plain", "Aún no hay una planificación");
+            return;
+        }
+        ex.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"ultima-planificacion.csv\"");
+        responder(ex, 200, "text/csv", csv);
     }
 
     // ---------------------------------------------------------------- archivos estáticos

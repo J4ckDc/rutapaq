@@ -1,4 +1,4 @@
-Carpeta de datos de RUTAPAQ (v0.4.1).
+Carpeta de datos de RUTAPAQ (v0.5.0).
 
 Contiene los archivos publicados por el profesor (versión v20260909), enero 2026 a diciembre 2028:
 
@@ -6,7 +6,8 @@ Contiene los archivos publicados por el profesor (versión v20260909), enero 202
                                          ej. 01d01h30m:56,30,c4910,02,36
   bloqueo.aamm.txt           bloqueos    ##d##h##m-##d##h##m:x1,y1,x2,y2,...
                                          ej. 01d02h22m-01d04h42m:25,45,45,45,45,40
-  mant.preventivo.09.10.txt  mantenimiento preventivo, aaaammdd:TTNN  (ej. 20260901:TA01)
+  mant.preventivo.09.10.txt  mantenimiento preventivo, aaaammdd:TTNN  (ej. 20260901:TA01); empieza a las
+                             00:00 y dura mantenimiento.horas.<tipo> horas (24 por defecto, v0.5.0)
                              El plan es bimensual y se repite cada 2 meses: setiembre vale para
                              los meses impares y octubre para los pares.
   Las averías no se leen de archivo: solo se registran de forma manual desde el visualizador

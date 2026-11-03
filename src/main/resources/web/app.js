@@ -1,4 +1,6 @@
-// RUTAPAQ v0.4.1 – visualizador del Simulador de rutas: simulación de 5 días y hasta el colapso, con averías de las unidades.
+// RUTAPAQ v0.5.0 – visualizador del Simulador de rutas: simulación de 5 días y hasta el colapso, con averías de las unidades.
+// v0.5: semáforo + vacío, filtros globales, indicadores globales, pestañas Unidades y Almacenes, envíos con productos,
+// ícono orientado según el movimiento, zoom continuo y reporte de la última planificación estable.
 // Recibe el estado completo por SSE (/api/stream) cada ~500 ms y lo dibuja en un canvas.
 // Toda la lógica (simulación, planificación, semáforo) está en el servidor: aquí solo se dibuja.
 // Entre una foto y la siguiente, las unidades se interpolan siguiendo su camino por las calles,
@@ -7,7 +9,9 @@
   'use strict';
 
   const $ = (id) => document.getElementById(id);
-  const ANCHO = 70, ALTO = 50, MARGEN = 34;
+  // v0.5 (B01): tamaño del mapa en km; lo fija el servidor (ien.mapaAnchoKm x ien.mapaAltoKm), ver fijarMapa
+  let ANCHO = 70, ALTO = 50;
+  const MARGEN = 34;
   const cv = $('mapa');
   const ctx = cv.getContext('2d');
 
@@ -29,6 +33,18 @@
   let escenarioVisto = '';
   let alertaColapso = null;     // alerta roja del colapso: no se cierra sola
   const vista = { zoom: 1, ox: 0, oy: 0 };
+  // v0.5: zoom continuo (sin saltos): el mapa se acerca o aleja de a pocos hacia el objetivo
+  const zoomAnim = { activo: false, modo: 'ancla', z: 1, px: 0, py: 0, mx: 0, my: 0, ox: 0, oy: 0 };
+  const ZOOM_MIN = 0.8, ZOOM_MAX = 14;
+  // v0.5: filtros globales del mapa (D05 a D07); por defecto se ve todo
+  const filtros = { tipo: new Set(['AUTO', 'MOTO', 'BICI']), carga: new Set(['VERDE', 'AMBAR', 'ROJO', 'VACIO']),
+    almacen: new Set(['VERDE', 'AMBAR', 'ROJO', 'VACIO']) };
+  const pasaUnidad = (u) => filtros.tipo.has(u.tipo) && filtros.carga.has(u.nivel);
+  const pasaAlmacen = (a) => a.central || filtros.almacen.has(a.nivel);
+  // v0.5: umbrales del semáforo (de /api/config), para que las leyendas coincidan con la configuración
+  let umbrales = { plazo: { verde: 95, ambar: 85 }, almacen: { verde: 30, ambar: 10 }, carga: { verde: 50, ambar: 20 },
+    flota: { verde: 50, ambar: 20 }, pedido: { verde: 0.5, ambar: 0.2 } };
+  const orient = new Map();     // v0.5: última orientación de cada unidad (para que no gire al detenerse)
 
   // ================================================================ utilidades
   const num = (v) => Number(v).toLocaleString('es-PE');
@@ -70,7 +86,7 @@
     const s = getComputedStyle(document.documentElement);
     for (const k of ['fondo', 'superficie', 'borde', 'texto', 'texto-2', 'texto-3', 'cian', 'naranja', 'verde', 'ambar', 'rojo', 'violeta', 'gris',
       'mapa-calle', 'mapa-manzana', 'mapa-eje', 'mapa-texto']) col[k] = s.getPropertyValue('--' + k).trim();
-    col.VERDE = col.verde; col.AMBAR = col.ambar; col.ROJO = col.rojo; col.NEUTRO = col['texto-2'];
+    col.VERDE = col.verde; col.AMBAR = col.ambar; col.ROJO = col.rojo; col.NEUTRO = col['texto-2']; col.VACIO = col.gris;
     cacheBase = null;
     sucio = true;
   }
@@ -177,10 +193,36 @@
     const p = a.ruta[i - 1], q = a.ruta[i];
     return [p[0] + (q[0] - p[0]) * r, p[1] + (q[1] - p[1]) * r];
   }
-  function rumbo(u, pos) {           // hacia dónde mira la unidad: -1 izquierda, 1 derecha
-    const sig = u.camino[0];
-    if (!sig) return 1;
-    return sig[0] < pos[0] - 1e-6 ? -1 : 1;
+  /** v0.5: dirección (dx, dy en km) del tramo que la unidad recorre en la animación; null si está quieta. */
+  function direccionAnim(id, ahora) {
+    const a = anim.get(id);
+    if (!a) return null;
+    const total = a.largos[a.largos.length - 1];
+    const f = estado && estado.estado === 'EJECUTANDO' ? Math.min(1, (ahora - a.t0) / intervalo) : 1;
+    if (total === 0 || f >= 1) return null;
+    const d = total * f;
+    let i = 1;
+    while (i < a.largos.length - 1 && a.largos[i] < d) i++;
+    const p = a.ruta[i - 1], q = a.ruta[i];
+    return [q[0] - p[0], q[1] - p[1]];
+  }
+  /**
+   * v0.5: hacia dónde mira la unidad (rúbrica C30): de lado hacia la derecha o la izquierda cuando avanza en el eje X,
+   * y girada hacia arriba o hacia abajo cuando avanza en el eje Y. Detenida, conserva su última orientación.
+   */
+  function orientacion(u, pos, ahora) {
+    let d = direccionAnim(u.id, ahora);
+    if (!d && u.camino.length) {
+      for (const n of u.camino) {
+        const dx = n[0] - pos[0], dy = n[1] - pos[1];
+        if (Math.abs(dx) + Math.abs(dy) > 1e-6) { d = [dx, dy]; break; }
+      }
+    }
+    if (d && Math.abs(d[0]) + Math.abs(d[1]) > 1e-6) {
+      orient.set(u.id, Math.abs(d[0]) >= Math.abs(d[1]) ? { sentido: d[0] < 0 ? -1 : 1, rot: 0 }
+        : { sentido: 1, rot: d[1] > 0 ? -Math.PI / 2 : Math.PI / 2 });    // en pantalla el norte está arriba
+    }
+    return orient.get(u.id) || { sentido: 1, rot: 0 };
   }
 
   // ================================================================ dibujo
@@ -233,7 +275,10 @@
     if (sel.tipo === 'unidad') {        // v03: con una averiada se resaltan también las que vienen a trasvasar
       return new Set([sel.id, ...ayudantes(averiaDe(estado.unidades.find((x) => x.id === sel.id)))]);
     }
-    if (sel.tipo === 'pedido') { const p = estado.pedidos.find((x) => x.id === sel.id); return new Set(p ? p.unidades : []); }
+    if (sel.tipo === 'pedido') {
+      if (sel.unidad) return new Set([sel.unidad]);       // v0.5: producto o envío elegido: solo su unidad (F02)
+      const p = estado.pedidos.find((x) => x.id === sel.id); return new Set(p ? p.unidades : []);
+    }
     if (sel.tipo === 'almacen') { const a = estado.almacenes.find((x) => x.id === sel.id); return new Set(a ? a.recargan : []); }
     return new Set();
   }
@@ -253,7 +298,7 @@
     if (sel.tipo === 'pedido') {
       const p = estado.pedidos.find((x) => x.id === sel.id);
       if (!p) return null;                       // ya se entregó: vuelve la vista completa
-      return { unidades: new Set(p.unidades), pedidos: new Set([p.id]) };
+      return { unidades: new Set(sel.unidad ? [sel.unidad] : p.unidades), pedidos: new Set([p.id]) };
     }
     return null;
   }
@@ -332,6 +377,7 @@
 
   function dibujarAlmacenes(g) {
     for (const a of estado.almacenes) {
+      if (!pasaAlmacen(a) && !(sel && sel.tipo === 'almacen' && sel.id === a.id)) continue;   // v0.5: filtro D07
       const [px, py] = aPantalla(a.x, a.y, g);
       const c = a.central ? col.naranja : col[a.nivel];
       const R = 17;
@@ -368,6 +414,7 @@
     const enf = enfoque();
     for (const u of estado.unidades) {
       if (enf && !enf.unidades.has(u.id)) continue;   // en enfoque solo se ven las unidades elegidas
+      if (!pasaUnidad(u) && !resaltadas.has(u.id)) continue;   // v0.5: filtros globales D05 y D06
       const p = posiciones.get(u.id);
       const averiada = u.estado === 'AVERIADA';       // v03: las averiadas se agrupan aparte
       const k = Math.round(p[0] * 20) + ':' + Math.round(p[1] * 20) + (averiada ? ':av' : '');
@@ -393,7 +440,10 @@
         ctx.strokeStyle = col.naranja; ctx.lineWidth = 1.4;
         ctx.beginPath(); ctx.arc(px, py, foco ? 18 : 15, 0, 7); ctx.stroke();
       }
-      glifo(u.tipo, px, py, c, rumbo(u, gr.pos), foco ? 1.25 : 1);
+      const o = orientacion(u, gr.pos, performance.now());
+      glifo(u.tipo, px, py, c, o.sentido, foco ? 1.25 : 1, o.rot);
+      // v0.5: barra de carga con semáforo + vacío bajo el ícono (C27); el color del ícono sigue siendo su estado
+      if (gr.unidades.length === 1 && u.estado !== 'MANTENIMIENTO') barraCarga(u, px, py + (foco ? 16 : 13.5));
       if (gr.unidades.length > 1) {
         const t = String(gr.unidades.length);
         ctx.fillStyle = col.cian; ctx.beginPath(); ctx.arc(px + 11, py - 10, 8, 0, 7); ctx.fill();
@@ -432,13 +482,27 @@
       ctx.fillText(sel.id, px + 21, py - 12);
     }
   }
+  /** v0.5: barra de carga de una unidad: verde/ámbar/rojo según su carga; vacía, solo el contorno gris. */
+  function barraCarga(u, x, y) {
+    const w = 18, h = 3.5, f = u.capacidad ? Math.max(0, Math.min(1, u.carga / u.capacidad)) : 0;
+    ctx.fillStyle = hexA(col.fondo, 0.85); ctx.fillRect(x - w / 2 - 1.5, y - 1.5, w + 3, h + 3);
+    if (u.nivel === 'VACIO') {
+      ctx.strokeStyle = col.gris; ctx.lineWidth = 1; ctx.strokeRect(x - w / 2 + 0.5, y + 0.5, w - 1, h - 1);
+    } else {
+      ctx.fillStyle = hexA(col.gris, 0.35); ctx.fillRect(x - w / 2, y, w, h);
+      ctx.fillStyle = col[u.nivel] || col.gris; ctx.fillRect(x - w / 2, y, w * f, h);
+    }
+  }
   function colorTipoAveria(tipo) { return tipo === 1 ? col.ambar : tipo === 2 ? col.naranja : col.rojo; }
   function enAlmacen(pos) { return estado.almacenes.some((a) => Math.abs(a.x - pos[0]) < 0.01 && Math.abs(a.y - pos[1]) < 0.01); }
 
-  /** Ícono de auto, moto o bicicleta (vista lateral), mirando a la derecha (sentido 1) o a la izquierda (-1). */
-  function glifo(tipo, x, y, color, sentido, esc) {
+  /**
+   * Ícono de auto, moto o bicicleta (vista lateral), mirando a la derecha (sentido 1) o a la izquierda (-1).
+   * v0.5: rot (radianes) lo gira para avanzar hacia arriba o hacia abajo.
+   */
+  function glifo(tipo, x, y, color, sentido, esc, rot = 0) {
     ctx.save();
-    ctx.translate(x, y); ctx.scale(sentido * esc, esc);
+    ctx.translate(x, y); if (rot) ctx.rotate(rot); ctx.scale(sentido * esc, esc);
     ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 1.6; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
     ctx.shadowColor = color; ctx.shadowBlur = 6;
     if (tipo === 'AUTO') {
@@ -505,7 +569,10 @@
       vacio.innerHTML = '<div class="cargando"></div><b>Preparando la simulación</b><span>Leyendo pedidos y bloqueos y calculando el primer plan de rutas…</span>';
     } else vacio.hidden = true;
 
-    if (sinSim) return;
+    if (sinSim) {
+      for (const id of ['gFlota', 'gAlm']) { $(id).textContent = '—'; $(id).className = 't-NEUTRO'; $(id + 'Barra').style.width = '0'; $(id + 'Det').textContent = '—'; }
+      return;
+    }
     const r = estado.resumen;
     $('kEntregados').textContent = num(r.entregados);
     const kt = $('kATiempo');
@@ -534,6 +601,18 @@
     $('dAveriadas').textContent = `${r.averiadasTipo1} · ${r.averiadasTipo2} · ${r.averiadasTipo3}`;   // v03
     $('dAveriadas').className = r.unidadesAveriadas ? 't-ROJO' : '';
     $('nPedidos').textContent = num(estado.pedidos.length);
+    $('nUnidades').textContent = num(estado.unidades.filter(pasaUnidad).length);
+    // v0.5: indicadores globales con semáforo + vacío (G01 a G04)
+    const globales = [['gFlota', r.pctFlota, r.nivelFlota, `${num(r.cargaFlota)} de ${num(r.capacidadFlota)} paquetes a bordo de las unidades en servicio`],
+      ['gAlm', r.pctAlmacenes, r.nivelAlmacenes, `${num(r.stockIntermedios)} de ${num(r.capacidadIntermedios)} paquetes en Nor-Oeste y Este`]];
+    for (const [id, pct, nivel, det] of globales) {
+      const v = Math.floor(Math.max(0, Math.min(100, pct)));
+      $(id).textContent = v + '%';
+      $(id).className = 't-' + nivel;
+      $(id + 'Barra').style.width = v + '%';
+      $(id + 'Barra').className = nivel;
+      $(id + 'Det').textContent = nivel === 'VACIO' ? 'Vacío · ' + det : det;
+    }
     $('nAverias').textContent = num(r.unidadesAveriadas);
     $('tabAverias').classList.toggle('hay', r.unidadesAveriadas > 0);
     $('dKm').textContent = num(r.km) + ' km';
@@ -579,9 +658,14 @@
   }
   function htmlPedido(p) {
     const consumido = Math.max(0, Math.min(100, Math.round((1 - p.holgura) * 100)));
-    const unidades = p.unidades.length
-      ? p.unidades.map((u) => `<button class="u" data-unidad="${u}" title="Ver solo ${u}" tabindex="-1">${iconoUnidad(tipoDe(u))}${u}</button>`).join('')
-      : '<em>sin asignar</em>';
+    // v0.5: un renglón por envío (unidad, cantidad, productos, almacén y hora de salida, hora de llegada), rúbrica E31
+    const unidades = p.envios && p.envios.length
+      ? `<span class="envios">${p.envios.map((e) => `<span class="envio${sel && sel.tipo === 'pedido' && sel.id === p.id && sel.unidad === e.u ? ' sel' : ''}" data-unidad="${e.u}" title="Ver la ruta de estos productos">`
+        + `<button class="u" data-unidad="${e.u}" title="Ver solo ${e.u}" tabindex="-1">${iconoUnidad(tipoDe(e.u))}${e.u}</button>`
+        + `<span class="det">${e.q} paq. <code>${rango(p.id, e.p0, e.p1)}</code><br>${textoSalida(e)} → llega ${horaSim(e.ll)}</span></span>`).join('')}</span>`
+      : p.unidades.length
+        ? p.unidades.map((u) => `<button class="u" data-unidad="${u}" title="Ver solo ${u}" tabindex="-1">${iconoUnidad(tipoDe(u))}${u}</button>`).join('')
+        : '<em>sin asignar</em>';
     return `<span class="cod">${p.id}</span><span class="plazo h${p.plazo}">${p.plazo}h</span>
       <span class="cli">${esc(p.cliente)} · (${p.x}, ${p.y}) · ${p.entregado}/${p.cantidad} entregados</span>
       <span class="uni">${unidades}</span>
@@ -626,6 +710,12 @@
     if (chip) { alternarUnidad(chip.dataset.unidad, true); return; }   // clic en la unidad de un pedido
     const li = ev.target.closest('.pedido');
     if (!li) return;
+    const envio = ev.target.closest('.envio');                          // v0.5: un envío: solo la ruta de sus productos (F02)
+    if (envio) {
+      if (sel && sel.tipo === 'pedido' && sel.id === li.dataset.id && sel.unidad === envio.dataset.unidad) seleccionar({ tipo: 'pedido', id: li.dataset.id }, false);
+      else seleccionar({ tipo: 'pedido', id: li.dataset.id, unidad: envio.dataset.unidad }, true);
+      return;
+    }
     if (sel && sel.tipo === 'pedido' && sel.id === li.dataset.id) seleccionar(null);   // segundo clic: quita la selección
     else seleccionar({ tipo: 'pedido', id: li.dataset.id }, true);
   }
@@ -636,8 +726,7 @@
     if (uf) { if (!(sel && sel.tipo === 'unidad' && sel.id === uf)) seleccionar({ tipo: 'unidad', id: uf }, true); }
     else if (sel && sel.tipo === 'unidad') seleccionar(null);
     botonLimpiar();
-    actualizarLista();
-    actualizarListaAverias();
+    actualizarListas();
   });
   $('limpiarBuscar').onclick = () => { limpiarFiltro(); $('buscar').focus(); };
   $('listaAlmacenes').addEventListener('pointerdown', (ev) => {
@@ -667,18 +756,30 @@
     sel = s;
     if (s && centrar) centrarEn(s);
     mostrarDetalle();
-    actualizarLista();
-    actualizarListaAverias();
+    actualizarListas();
     sucio = true;
+  }
+  /**
+   * v0.5: clic en una unidad o un almacén del mapa: se elige, se abre su pestaña del panel derecho y su fila queda
+   * resaltada y visible (vuelta del enlace bidireccional mapa-panel, rúbrica F01 y F05). Un segundo clic la suelta.
+   */
+  function desdeMapa(tipo, id) {
+    if (sel && sel.tipo === tipo && sel.id === id) { limpiarFiltro(); return; }
+    quitarFiltroUnidad();
+    seleccionar({ tipo, id });
+    abrirPanel('panelDer');                      // los paneles empiezan contraídos (E01): se abre para mostrar la fila
+    elegirPestana(tipo === 'unidad' ? 'unidades' : 'almacenes');
+    const fila = document.querySelector(tipo === 'unidad' ? `#listaUnidades li[data-id="${id}"]` : `#listaAlmacenesDer li[data-id="${id}"]`);
+    if (fila) fila.scrollIntoView({ block: 'nearest' });
   }
   function centrarEn(s) {
     const p = ubicacion(s);
     if (!p) return;
-    if (vista.zoom < 2.5) vista.zoom = 2.5;
-    const g0 = geom();
-    const [px, py] = aPantalla(p[0], p[1], g0);
-    vista.ox += g0.w / 2 - px; vista.oy += g0.h * 0.36 - py;   // un poco arriba: abajo va la tarjeta de detalle
-    sucio = true;
+    // v0.5: se desplaza y acerca de forma continua hasta dejar el punto un poco arriba del centro (abajo va el detalle)
+    const z = Math.max(zoomAnim.activo ? zoomAnim.z : vista.zoom, 2.5);
+    const w = cv.clientWidth, h = cv.clientHeight;
+    const sc = Math.min((w - 2 * MARGEN) / ANCHO, (h - 2 * MARGEN) / ALTO) * z;
+    irA(z, w / 2 - (w - ANCHO * sc) / 2 - p[0] * sc, h * 0.36 - (h - ALTO * sc) / 2 - (ALTO - p[1]) * sc);
   }
   function ubicacion(s) {
     if (!estado) return null;
@@ -705,16 +806,17 @@
         : `<span class="chip ${u.estado}">${ESTADOS_U[u.estado] || u.estado}</span>`;
       const paradas = u.paradas.length ? `${av ? '<p class="nota">Plan para cuando termine la avería:</p>' : ''}<ul class="paradas">${u.paradas.slice(0, 8).map((p) => {
         const trv = p.tipo === 'RECARGA' && esTrasvase(p.ref);
-        return `<li><b>${p.tipo === 'ENTREGA' ? ++n : trv ? 'T' : p.tipo === 'RECARGA' ? 'R' : 'C'}</b>${
-          p.tipo === 'ENTREGA' ? `Entregar ${p.cantidad} a ${p.ref} en (${p.x}, ${p.y})`
+        return `<li><b>${p.tipo === 'ENTREGA' ? ++n : trv ? 'T' : p.tipo === 'RECARGA' ? 'R' : 'C'}</b><span>${
+          p.tipo === 'ENTREGA' ? `Entregar ${p.cantidad} a ${p.ref} en (${p.x}, ${p.y}) · <code>${rango(p.ref, p.p0, p.p1)}</code>`
             : trv ? `Recoger ${p.cantidad} paquetes de ${p.ref.slice(4)} (trasvase)`
-              : p.tipo === 'RECARGA' ? `Recargar en ${nombreAlmacen(p.ref)}` : 'Refrigerio (1 h)'}</li>`;
+              : p.tipo === 'RECARGA' ? `Recargar en ${nombreAlmacen(p.ref)}` : 'Refrigerio (1 h)'} · llega ${horaSim(p.ll)}</span></li>`;
       }).join('')}${u.paradas.length > 8 ? `<li><b></b>y ${u.paradas.length - 8} paradas más</li>` : ''}</ul>` : '';
       const nota = u.paradas.length || av ? '' : `<p class="nota">${u.estado === 'MANTENIMIENTO'
         ? `Fuera de servicio por mantenimiento preventivo hasta el ${fmtCorta(u.noDisponibleHasta)}.` : 'Sin paradas asignadas.'}</p>`;
       html = `<h4>${u.id} ${chip}</h4>
         <div class="sub">${TIPOS[u.tipo]} · ${u.km} km recorridos</div>
-        <dl><dt>Carga</dt><dd class="t-${u.nivel}">${u.carga} / ${u.capacidad} paquetes</dd>
+        <dl><dt>Carga</dt><dd class="t-${u.nivel}">${u.carga} / ${u.capacidad} paquetes${u.nivel === 'VACIO' ? ' (vacía)' : ''}</dd>
+        <dt>Origen</dt><dd>${esc(nombreAlmacen(u.origen))}${u.salida >= 0 ? ' · salió ' + horaSim(u.salida) : ''}</dd>
         <dt>Posición</dt><dd>(${u.x.toFixed(1)}, ${u.y.toFixed(1)})</dd>
         <dt>Pedidos asignados</dt><dd>${pedidosU.length ? pedidosU.join(', ') : '—'}</dd>${av ? filasAveria(av) : ''}</dl>
         ${av ? `<p class="estado-av">${textoFaseAveria(av)}</p>` : ''}${paradas}${nota}`;
@@ -738,7 +840,9 @@
         <dt>Plazo</dt><dd>${p.plazo} h</dd>
         <dt>Registrado</dt><dd>${fmtCorta(p.registro)}</dd>
         <dt>Límite</dt><dd class="t-${p.nivel}">${fmtCorta(p.limite)}</dd>
-        <dt>Atendido por</dt><dd>${p.unidades.length ? p.unidades.join(', ') : 'sin asignar'}</dd></dl>`;
+        <dt>Atendido por</dt><dd>${p.unidades.length ? p.unidades.join(', ') : 'sin asignar'}</dd>
+        ${p.entregado ? `<dt>Productos entregados</dt><dd><code>${rango(p.id, 1, p.entregado)}</code></dd>` : ''}</dl>
+        ${tablaEnvios(p)}`;
     } else if (sel.tipo === 'bloqueo') {
       const b = estado.bloqueos[sel.id];
       if (!b) { caja.hidden = true; sel = null; return; }
@@ -808,18 +912,32 @@
   // ---- lista de unidades averiadas por tipo e historial (pestaña Averías del panel derecho)
   const elementosAveria = new Map();
   let pestana = 'pedidos';
+  // v0.5: cuatro pestañas en el panel derecho: Pedidos, Unidades, Almacenes y Averías
+  const PESTANAS = {
+    pedidos: ['tabPedidos', 'vistaPedidos', 'Rastreo de entregas', 'Buscar pedido, cliente o unidad (TA03)'],
+    unidades: ['tabUnidades', 'vistaUnidades', 'Unidades de transporte', 'Buscar unidad (TA03) o pedido'],
+    almacenes: ['tabAlmacenes', 'vistaAlmacenes', 'Almacenes', 'Buscar pedido, cliente o unidad'],
+    averias: ['tabAverias', 'vistaAverias', 'Unidades averiadas', 'Buscar unidad o pedido'],
+  };
   function elegirPestana(p) {
     pestana = p;
-    for (const [id, vista, nombre] of [['tabPedidos', 'vistaPedidos', 'pedidos'], ['tabAverias', 'vistaAverias', 'averias']]) {
+    for (const [nombre, [id, vista]] of Object.entries(PESTANAS)) {
       $(id).classList.toggle('activa', p === nombre);
       $(id).setAttribute('aria-selected', String(p === nombre));
       $(vista).hidden = p !== nombre;
     }
-    $('tituloDer').textContent = p === 'pedidos' ? 'Rastreo de entregas' : 'Unidades averiadas';
+    $('tituloDer').textContent = PESTANAS[p][2];
+    $('buscar').placeholder = PESTANAS[p][3];
+    actualizarListas();
+  }
+  for (const nombre of Object.keys(PESTANAS)) $(PESTANAS[nombre][0]).onclick = () => elegirPestana(nombre);
+  /** v0.5: actualiza las listas del panel derecho (solo se dibuja la de la pestaña visible). */
+  function actualizarListas() {
+    actualizarLista();
+    actualizarListaUnidades();
+    actualizarListaAlmacenesDer();
     actualizarListaAverias();
   }
-  $('tabPedidos').onclick = () => elegirPestana('pedidos');
-  $('tabAverias').onclick = () => elegirPestana('averias');
 
   function htmlAveria(a) {
     const activa = a.fase !== 'FINALIZADA';
@@ -1041,6 +1159,7 @@
 
   let arrastre = null;
   cv.addEventListener('pointerdown', (e) => {
+    zoomAnim.activo = false;                   // v0.5: arrastrar detiene el zoom animado
     arrastre = { x: e.clientX, y: e.clientY, ox: vista.ox, oy: vista.oy, movio: false };
     cv.setPointerCapture(e.pointerId);
   });
@@ -1068,7 +1187,8 @@
     if (arrastre && !arrastre.movio) {
       const o = objetoEn(e.clientX - r.left, e.clientY - r.top);
       if (!o) { if (!enfoque()) seleccionar(null); }          // en enfoque, un clic en el vacío no lo quita
-      else if (o.tipo === 'unidad') alternarUnidad(o.id, false);
+      else if (o.tipo === 'unidad') desdeMapa('unidad', o.id);          // v0.5: del mapa a la lista de unidades (F01)
+      else if (o.tipo === 'almacen') desdeMapa('almacen', o.id);        // v0.5: del mapa a la lista de almacenes (F05)
       else if (o.tipo === 'pedido' && sel && sel.tipo === 'pedido' && sel.id === o.id) seleccionar(null);
       else { if (o.tipo !== 'pedido') quitarFiltroUnidad(); seleccionar({ tipo: o.tipo, id: o.id }); }
     }
@@ -1076,23 +1196,48 @@
     cv.classList.remove('arrastrando');
   });
   cv.addEventListener('pointerleave', () => { $('tooltip').hidden = true; });
+  // v0.5: zoom continuo con la rueda (rúbrica C08): cada giro fija un objetivo y el mapa se acerca de a pocos,
+  // manteniendo fijo el punto bajo el mouse. Con un touchpad, el desplazamiento fino da un zoom fino.
   cv.addEventListener('wheel', (e) => {
     e.preventDefault();
     const r = cv.getBoundingClientRect();
-    acercar(e.deltaY < 0 ? 1.2 : 1 / 1.2, e.clientX - r.left, e.clientY - r.top);
+    const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
+    acercar(Math.exp(-Math.max(-300, Math.min(300, d)) * 0.0018), e.clientX - r.left, e.clientY - r.top);
   }, { passive: false });
-  cv.addEventListener('dblclick', () => { vista.zoom = 1; vista.ox = 0; vista.oy = 0; sucio = true; });
+  cv.addEventListener('dblclick', () => irA(1, 0, 0));
+  /** Fija un nuevo objetivo de zoom alrededor del punto (px, py) de la pantalla; el bucle de dibujo lo alcanza. */
   function acercar(f, px, py) {
-    const g = geom();
-    const [mx, my] = aMundo(px, py, g);
-    vista.zoom = Math.min(14, Math.max(0.8, vista.zoom * f));
-    const [nx, ny] = aPantalla(mx, my);
-    vista.ox += px - nx; vista.oy += py - ny;
+    const mismoPunto = zoomAnim.activo && zoomAnim.modo === 'ancla' && Math.abs(zoomAnim.px - px) < 2 && Math.abs(zoomAnim.py - py) < 2;
+    const base = zoomAnim.activo && zoomAnim.modo === 'ancla' ? zoomAnim.z : vista.zoom;
+    const [mx, my] = mismoPunto ? [zoomAnim.mx, zoomAnim.my] : aMundo(px, py, geom());
+    Object.assign(zoomAnim, { activo: true, modo: 'ancla', z: Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, base * f)), px, py, mx, my });
     sucio = true;
   }
-  $('zoomMas').onclick = () => acercar(1.3, cv.clientWidth / 2, cv.clientHeight / 2);
-  $('zoomMenos').onclick = () => acercar(1 / 1.3, cv.clientWidth / 2, cv.clientHeight / 2);
-  $('zoomReset').onclick = () => { vista.zoom = 1; vista.ox = 0; vista.oy = 0; sucio = true; };
+  /** Desplaza y acerca de forma continua hasta un zoom y un desplazamiento dados. */
+  function irA(z, ox, oy) {
+    Object.assign(zoomAnim, { activo: true, modo: 'libre', z: Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z)), ox, oy });
+    sucio = true;
+  }
+  /** Un cuadro de la animación del zoom; devuelve true si el mapa cambió. */
+  function pasoZoom() {
+    if (!zoomAnim.activo) return false;
+    const k = 0.2;
+    vista.zoom += (zoomAnim.z - vista.zoom) * k;
+    if (zoomAnim.modo === 'ancla') {
+      const [nx, ny] = aPantalla(zoomAnim.mx, zoomAnim.my);
+      vista.ox += zoomAnim.px - nx; vista.oy += zoomAnim.py - ny;
+      if (Math.abs(zoomAnim.z - vista.zoom) < 0.001) zoomAnim.activo = false;
+    } else {
+      vista.ox += (zoomAnim.ox - vista.ox) * k; vista.oy += (zoomAnim.oy - vista.oy) * k;
+      if (Math.abs(zoomAnim.z - vista.zoom) < 0.001 && Math.abs(zoomAnim.ox - vista.ox) < 0.3 && Math.abs(zoomAnim.oy - vista.oy) < 0.3) {
+        vista.zoom = zoomAnim.z; vista.ox = zoomAnim.ox; vista.oy = zoomAnim.oy; zoomAnim.activo = false;
+      }
+    }
+    return true;
+  }
+  $('zoomMas').onclick = () => acercar(1.4, cv.clientWidth / 2, cv.clientHeight / 2);
+  $('zoomMenos').onclick = () => acercar(1 / 1.4, cv.clientWidth / 2, cv.clientHeight / 2);
+  $('zoomReset').onclick = () => irA(1, 0, 0);
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (unidadFiltrada() || (sel && sel.tipo === 'unidad')) limpiarFiltro();
@@ -1111,6 +1256,17 @@
     panel.hidden = ocultar;
     document.querySelector(`.reabrir[data-panel="${b.dataset.panel}"]`).hidden = !ocultar;
   }));
+  /** v0.5: muestra un panel si estaba contraído (en celulares, cierra el otro). */
+  function abrirPanel(id) {
+    const panel = $(id);
+    if (!panel.hidden) return;
+    if (window.matchMedia('(max-width: 760px)').matches) {
+      document.querySelectorAll('.panel').forEach((p) => { p.hidden = true; });
+      document.querySelectorAll('.reabrir').forEach((r) => { r.hidden = false; });
+    }
+    panel.hidden = false;
+    document.querySelector(`.reabrir[data-panel="${id}"]`).hidden = true;
+  }
   $('plegarMenu').onclick = () => {
     $('app').classList.toggle('menu-plegado');
     setTimeout(ajustarTamano, 0);
@@ -1155,6 +1311,7 @@
     fc.hidden = estado.tipoFin !== 'SIN_COLAPSO';
     fc.innerHTML = fc.hidden ? '' : `<p class="colapso-motivo ok">${esc(estado.motivoFin)}.</p>`;
     llenarIndicadoresFinales();
+    cargarPlan();                                // v0.5: reporte de la última planificación estable (G08)
     $('modalFin').showModal();
   }
 
@@ -1216,6 +1373,7 @@
     fc.innerHTML = html;
     fc.hidden = !html;
     llenarIndicadoresFinales();
+    cargarPlan();                                // v0.5: reporte de la última planificación estable (G10)
     if (!$('modalFin').open) $('modalFin').showModal();
   }
   /** Indicadores acumulados del escenario (los mismos al terminar los 5 días, al colapsar o sin colapso). */
@@ -1230,7 +1388,8 @@
       [num(r.km) + ' km', 'Recorrido de la flota'],
       ['S/ ' + num(r.costo), 'Costo de transporte'],
       [num(estado.ciclos), 'Ciclos de planificación'],
-      [num(estado.msMaximoPlan) + ' ms', 'Ta máximo'],
+      [num(estado.msMaximoPlan) + ' ms', 'Ta máximo (tiempo de ejecución del planificador)'],
+      [`${num(estado.scMin)} min · ${Number(estado.saSeg).toLocaleString('es-PE', { maximumFractionDigits: 1 })} s`, 'Sc (salto de consumo) · Sa (salto del algoritmo)'],
       [num(r.averias), 'Averías (tipo 1, 2 y 3)'],
       [num(r.trasvasados), 'Paquetes trasvasados'],
       [num(r.devueltos), 'Devueltos al central'],
@@ -1284,18 +1443,32 @@
   $('btnDetener').onclick = () => post('/api/simulacion/detener').catch((e) => avisar(e.message, 'error'));
   $('btnReanudar').onclick = () => post('/api/simulacion/reanudar').catch((e) => avisar(e.message, 'error'));
 
-  fetch('/api/config').then((r) => r.json()).then((c) => {
-    if (!$('fecha').value) $('fecha').value = `${c.fechaInicio}T${c.horaInicio || '00:00'}`;
-    if (c.stockVerde !== undefined) {           // v0.4.1: leyenda del semáforo de stock con los umbrales configurados
-      $('lsVerde').textContent = `desde ${c.stockVerde}%`;
-      $('lsAmbar').textContent = `desde ${c.stockAmbar}%`;
-      $('lsRojo').textContent = `menos de ${c.stockAmbar}%`;
-    }
-    if (c.averiaTipo1Horas !== undefined) {
-      cfgAveria = { tipo1Horas: c.averiaTipo1Horas, enLugarHoras: c.averiaEnLugarHoras, tipo3Dias: c.averiaTipo3Dias,
-        tipo3Hora: c.averiaTipo3Hora, trasvaseMin: c.averiaTrasvaseMinutos };
-    }
-  }).catch(() => { $('fecha').value = '2026-01-01T00:00'; });
+  /**
+   * v0.5 (B01): el tamaño del mapa viene del servidor: el de la simulación en curso (estado.mapa) o, si no hay
+   * simulación, el configurado (/api/config). Si cambia, se vuelve a mostrar la ciudad completa.
+   */
+  function fijarMapa(m) {
+    if (!m || !(m.ancho > 0) || !(m.alto > 0) || (m.ancho === ANCHO && m.alto === ALTO)) return;
+    ANCHO = m.ancho; ALTO = m.alto;
+    vista.zoom = 1; vista.ox = 0; vista.oy = 0;
+    sucio = true;
+  }
+
+  /** Lee /api/config: leyendas del semáforo, reglas de averías y fecha propuesta (v0.5: también tras guardar la configuración). */
+  function cargarConfigCliente() {
+    return fetch('/api/config').then((r) => r.json()).then((c) => {
+      configVersionVista = c.configVersion;
+      if (!$('fecha').value) $('fecha').value = `${c.fechaInicio}T${c.horaInicio || '00:00'}`;
+      if (!(estado && estado.mapa)) fijarMapa(c.mapa);   // v0.5 (B01): sin simulación, el mapa configurado
+      if (c.semaforo) aplicarUmbrales(c.semaforo);   // v0.5: todas las leyendas del semáforo según la configuración
+      if (c.averiaTipo1Horas !== undefined) {
+        cfgAveria = { tipo1Horas: c.averiaTipo1Horas, enLugarHoras: c.averiaEnLugarHoras, tipo3Dias: c.averiaTipo3Dias,
+          tipo3Hora: c.averiaTipo3Hora, trasvaseMin: c.averiaTrasvaseMinutos };
+      }
+    }).catch(() => { if (!$('fecha').value) $('fecha').value = '2026-01-01T00:00'; });
+  }
+  let configVersionVista = null;
+  cargarConfigCliente();
 
   // ================================================================ conexión con el servidor (SSE)
   function conectar() {
@@ -1310,12 +1483,20 @@
       if (estado.escenario && estado.estado !== 'SIN_SIMULACION' && estado.escenario + estado.inicio !== escenarioVisto) {
         escenarioVisto = estado.escenario + estado.inicio;   // v04: una simulación nueva fija el modo mostrado
         if (estado.escenario === 'COLAPSO' || estado.escenario === 'SEMANAL') elegirModo(estado.escenario);
+        // v0.5: la fecha y hora de inicio también siguen a la simulación en curso (al abrir la página, en otra pestaña
+        // o en otro dispositivo, y cuando otro navegador inicia una nueva)
+        if (estado.inicio) $('fecha').value = String(estado.inicio).slice(0, 16);
       }
+      if (estado.mapa) fijarMapa(estado.mapa);              // v0.5 (B01): mapa de la simulación en curso
       recibidoEn = ahora;
       $('estado').classList.remove('desconectado');
+      if (estado.configVersion !== undefined && configVersionVista !== null && estado.configVersion !== configVersionVista) {
+        configVersionVista = estado.configVersion;   // v0.5: la configuración cambió (aquí o en otro navegador)
+        cargarConfigCliente();
+        configCambioExterno();
+      }
       actualizarPaneles();
-      actualizarLista();
-      actualizarListaAverias();
+      actualizarListas();
       actualizarDialogoAveria();
       mostrarDetalle();
       revisarEventos(prev);
@@ -1332,10 +1513,472 @@
   // ================================================================ bucle de dibujo
   function bucle() {
     const animando = estado && estado.estado === 'EJECUTANDO';
-    if (sucio || animando) { dibujar(); sucio = false; }
+    const zoom = pasoZoom();                     // v0.5: zoom continuo
+    if (sucio || animando || zoom) { dibujar(); sucio = false; }
     actualizarReloj();
     requestAnimationFrame(bucle);
   }
+
+
+  // ================================================================ v0.5: horas, productos y envíos
+  /** Fecha y hora de un instante de la simulación dado en segundos desde su inicio. */
+  function fechaSim(seg) { const i = estado && fechaLocal(estado.inicio); return i ? new Date(i.getTime() + seg * 1000) : null; }
+  function horaSim(seg) {
+    if (seg === undefined || seg === null || seg < 0) return '—';
+    const d = fechaSim(seg), hoy = fechaSim(estado.t);
+    if (!d) return '—';
+    const hm = `${dos(d.getHours())}:${dos(d.getMinutes())}`;
+    return hoy && d.toDateString() === hoy.toDateString() ? hm : `${dos(d.getDate())}/${dos(d.getMonth() + 1)} ${hm}`;
+  }
+  function minutosTxt(min) {
+    min = Math.max(0, Math.round(min));
+    if (min < 60) return `${min} min`;
+    return `${Math.floor(min / 60)} h ${dos(min % 60)} min`;
+  }
+  /** Identificadores de producto: P12-3, o P12-1 a P12-5. */
+  const rango = (ped, p0, p1) => p0 === undefined ? '' : p0 === p1 ? `${ped}-${p0}` : `${ped}-${p0} a ${ped}-${p1}`;
+  /** De dónde y cuándo salen los productos de un envío. */
+  function textoSalida(e) {
+    const de = esTrasvase(e.de) ? 'trasvase de ' + e.de.slice(4) : nombreAlmacen(e.de);
+    if (e.sal < 0) return `desde ${de}`;
+    return e.sal <= estado.t ? `salió de ${de} ${horaSim(e.sal)}` : `sale de ${de} ${horaSim(e.sal)}`;
+  }
+  /** Tabla de envíos de un pedido en el detalle: unidad, productos, ruta, salida y llegada (E31, F02 y F03). */
+  function tablaEnvios(p) {
+    if (!p.envios || !p.envios.length) return '<p class="nota">Aún no tiene envíos planificados.</p>';
+    const filas = p.envios.map((e) => `<tr class="fila-envio${sel && sel.unidad === e.u ? ' sel' : ''}" data-unidad="${e.u}" title="Ver la ruta de estos productos">
+        <td>${e.u}</td><td><code>${rango(p.id, e.p0, e.p1)}</code><br>${e.q} paq.</td>
+        <td>${esc(textoSalida(e))}<br>parada ${e.orden} de ${e.u}</td><td>${horaSim(e.ll)}</td></tr>`).join('');
+    return `<table class="envios-tabla"><thead><tr><th>Unidad</th><th>Productos</th><th>Ruta</th><th>Llega</th></tr></thead><tbody>${filas}</tbody></table>
+      ${p.envios.length > 1 || (sel && sel.unidad) ? '<button class="ver-todas" type="button">Ver las rutas de todos sus productos</button>' : ''}`;
+  }
+  $('detalleCuerpo').addEventListener('click', (ev) => {
+    if (!sel || sel.tipo !== 'pedido') return;
+    const fila = ev.target.closest('.fila-envio');
+    if (fila) { seleccionar({ tipo: 'pedido', id: sel.id, unidad: fila.dataset.unidad }, true); return; }   // F02
+    if (ev.target.closest('.ver-todas')) seleccionar({ tipo: 'pedido', id: sel.id }, true);                 // F03
+  });
+
+  // ================================================================ v0.5: lista de unidades (E02 a E07, E13 a E15, F01)
+  /** Destino inmediato y origen de una unidad, con los minutos a la llegada y a la salida. */
+  function infoUnidad(u) {
+    const t = estado.t;
+    const aqui = (u.estado === 'ENTREGANDO' || u.estado === 'TRASVASE' || u.estado === 'REFRIGERIO') && u.ocupadoHasta > t;
+    const prox = u.paradas[0] || null;
+    let destino = null;
+    if (u.averia) destino = null;
+    else if (aqui) destino = { texto: u.estado === 'ENTREGANDO' ? `entregando en (${Math.round(u.x)}, ${Math.round(u.y)})` : u.estado === 'TRASVASE' ? 'trasvase en curso' : 'refrigerio',
+      llega: t, sale: u.ocupadoHasta, enDestino: true };
+    else if (prox) {
+      // el refrigerio se toma al llegar al nodo de la parada siguiente: el destino es esa parada
+      const real = prox.tipo === 'REFRIGERIO' && u.paradas[1] ? u.paradas[1] : prox;
+      const texto = real.tipo === 'ENTREGA' ? `${real.ref} en (${real.x}, ${real.y})` : real.tipo === 'RECARGA' ? nombreAlmacen(real.ref) : 'refrigerio';
+      destino = { texto: real !== prox ? texto + ' (antes, refrigerio de 1 h)' : texto, llega: prox.ll, sale: real.sa, enDestino: false };
+    }
+    const recarga = u.paradas.find((p) => p.tipo === 'RECARGA' && !esTrasvase(p.ref));
+    return {
+      destino,
+      llegaMin: destino && !destino.enDestino ? Math.max(0, (destino.llega - t) / 60) : destino ? 0 : null,
+      saleMin: destino ? Math.max(0, (destino.sale - t) / 60) : null,
+      salioMin: u.salida >= 0 ? Math.max(0, (t - u.salida) / 60) : null,
+      recarga, almLlegaMin: recarga ? Math.max(0, (recarga.ll - t) / 60) : null,
+    };
+  }
+  const elementosUnidad = new Map();
+  function actualizarListaUnidades() {
+    if (pestana !== 'unidades') return;
+    const ul = $('listaUnidades');
+    let lista = estado && estado.unidades ? estado.unidades.filter(pasaUnidad) : [];
+    const q = $('buscar').value.trim().toLowerCase();
+    if (q) lista = lista.filter((u) => u.id.toLowerCase().includes(q) || u.paradas.some((p) => p.tipo === 'ENTREGA' && p.ref.toLowerCase() === q));
+    const info = new Map(lista.map((u) => [u.id, infoUnidad(u)]));
+    // búsqueda por minutos al destino inmediato o al origen, a la llegada o a la salida (E06, E07)
+    const v = parseFloat($('minValor').value);
+    const crit = $('minCriterio').value;
+    if (!isNaN(v)) {
+      lista = lista.filter((u) => {
+        const i = info.get(u.id);
+        const m = crit === 'destino-llegada' ? (i.destino && !i.destino.enDestino ? i.llegaMin : null)
+          : crit === 'destino-salida' ? i.saleMin : crit === 'origen-salida' ? i.salioMin : i.almLlegaMin;
+        return m !== null && m <= v;
+      });
+    }
+    // orden por ocupación, hora de salida o de llegada, ascendente o descendente (E13 a E15)
+    const orden = $('ordenUnidades').value;
+    const fin = (x, asc) => (x === null || x === undefined || x < 0 ? (asc ? Infinity : -Infinity) : x);
+    const clave = {
+      'ocupacion-desc': (u) => -u.ocupacion, 'ocupacion-asc': (u) => u.ocupacion,
+      'salida-asc': (u) => fin(u.salida, true), 'salida-desc': (u) => -fin(u.salida, false),
+      'llegada-asc': (u) => fin(info.get(u.id).destino ? info.get(u.id).destino.llega : null, true),
+      'llegada-desc': (u) => -fin(info.get(u.id).destino ? info.get(u.id).destino.llega : null, false),
+    }[orden];
+    lista = [...lista].sort((a, b) => (clave ? clave(a) - clave(b) : 0) || a.id.localeCompare(b.id));
+    $('etiquetaUnidades').textContent = !isNaN(v) ? 'Coinciden con los minutos' : q ? 'Resultados' : 'Unidades';
+    $('cuentaUnidades').textContent = `${num(lista.length)} ${lista.length === 1 ? 'unidad' : 'unidades'}`;
+    const vistos = new Set();
+    lista.forEach((u, i) => {
+      let li = elementosUnidad.get(u.id);
+      if (!li) { li = document.createElement('li'); li.className = 'pedido unidad-fila'; li.dataset.id = u.id; li.tabIndex = 0; elementosUnidad.set(u.id, li); }
+      const html = htmlUnidad(u, info.get(u.id));
+      if (li._html !== html) { li.innerHTML = html; li._html = html; }
+      li.classList.toggle('sel', !!(sel && sel.tipo === 'unidad' && sel.id === u.id));
+      if (ul.children[i] !== li) ul.insertBefore(li, ul.children[i] || null);
+      vistos.add(u.id);
+    });
+    for (const [id, li] of elementosUnidad) if (!vistos.has(id)) { li.remove(); elementosUnidad.delete(id); }
+    let vacia = ul.querySelector('.lista-vacia');
+    if (!lista.length) {
+      if (!vacia) { vacia = document.createElement('li'); vacia.className = 'lista-vacia'; ul.appendChild(vacia); }
+      vacia.textContent = estado && estado.unidades ? 'Ninguna unidad coincide con los filtros o la búsqueda.' : 'Inicia una simulación para ver las unidades.';
+    } else if (vacia) vacia.remove();
+  }
+  function htmlUnidad(u, i) {
+    const pct = Math.floor(u.ocupacion);
+    const chip = u.averia ? `<span class="chip AVERIADA">Avería tipo ${u.averia.tipo}</span>` : `<span class="chip ${u.estado}">${ESTADOS_U[u.estado] || u.estado}</span>`;
+    let destino = '<span class="linea">Destino: <b>—</b></span>';
+    if (u.averia) destino = `<span class="linea">No disponible hasta ${fmtCorta(u.averia.disponible)}</span>`;
+    else if (u.estado === 'MANTENIMIENTO') destino = `<span class="linea">En mantenimiento hasta ${fmtCorta(u.noDisponibleHasta)}</span>`;
+    else if (i.destino) destino = `<span class="linea">Destino: <b>${esc(i.destino.texto)}</b> · ${i.destino.enDestino
+      ? `sale ${horaSim(i.destino.sale)} (en ${minutosTxt(i.saleMin)})`
+      : `llega ${horaSim(i.destino.llega)} (en ${minutosTxt(i.llegaMin)}) · sale ${horaSim(i.destino.sale)}`}</span>`;
+    let origen = `<span class="linea">Origen: <b>${esc(nombreAlmacen(u.origen))}</b>${i.salioMin !== null ? ` · salió ${horaSim(u.salida)} (hace ${minutosTxt(i.salioMin)})` : ' · aún no sale'}`;
+    if (i.recarga) origen += ` · vuelve a ${esc(nombreAlmacen(i.recarga.ref))} en ${minutosTxt(i.almLlegaMin)}`;
+    origen += '</span>';
+    let envios = '';
+    if (sel && sel.tipo === 'unidad' && sel.id === u.id) {   // fila elegida: envíos y productos que traslada (E04, E05)
+      const ent = u.paradas.filter((p) => p.tipo === 'ENTREGA');
+      envios = `<ul class="envios-u"><li>A bordo: <b>${u.carga}</b> de ${u.capacidad} paquetes</li>${ent.length ? ent.map((p) =>
+        `<li><b>${p.ref}</b> · ${p.cantidad} paq. <code>${rango(p.ref, p.p0, p.p1)}</code> → (${p.x}, ${p.y}) · llega ${horaSim(p.ll)}</li>`).join('')
+        : '<li>Sin envíos asignados.</li>'}</ul>`;
+    }
+    return `<span class="cod">${iconoUnidad(u.tipo)}${u.id} ${chip}</span>
+      <span class="carga" title="Carga: ${u.carga} de ${u.capacidad} paquetes"><i class="p ${u.nivel}"></i>${u.carga}/${u.capacidad} · ${pct}%</span>
+      <span class="riel-c"><span class="${u.nivel}" style="width:${pct}%"></span></span>${destino}${origen}${envios}`;
+  }
+  function elegirUnidadLista(ev) {
+    const li = ev.target.closest('.unidad-fila');
+    if (!li) return;
+    if (sel && sel.tipo === 'unidad' && sel.id === li.dataset.id) seleccionar(null);
+    else { quitarFiltroUnidad(); seleccionar({ tipo: 'unidad', id: li.dataset.id }, true); }   // F01: de la lista al mapa
+  }
+  $('listaUnidades').addEventListener('click', elegirUnidadLista);
+  $('listaUnidades').addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); elegirUnidadLista(ev); } });
+  for (const id of ['ordenUnidades', 'minCriterio']) $(id).addEventListener('change', actualizarListaUnidades);
+  $('minValor').addEventListener('input', actualizarListaUnidades);
+
+  // ================================================================ v0.5: lista de almacenes (E18 a E22, F05)
+  const abiertos = new Set();        // secciones desplegadas de cada almacén (se conservan al refrescar)
+  function actualizarListaAlmacenesDer() {
+    if (pestana !== 'almacenes') return;
+    const ul = $('listaAlmacenesDer');
+    if (!estado || !estado.almacenes) { ul.innerHTML = '<li class="lista-vacia">Inicia una simulación para ver los almacenes.</li>'; ul._html = ''; return; }
+    const q = $('buscar').value.trim().toLowerCase();
+    const coincide = (e) => !q || e.pedido.toLowerCase().includes(q) || e.u.toLowerCase().includes(q) || (e.cli || '').toLowerCase().includes(q);
+    const h = Math.round(estado.ventanaHoras || 4);
+    const html = estado.almacenes.filter(pasaAlmacen).map((a) => {
+      const elegido = sel && sel.tipo === 'almacen' && sel.id === a.id;
+      const stock = a.central ? '<span class="pct">∞</span>' : `<span class="pct t-${a.nivel}">${pctStock(a)}%</span>`;
+      const icono = `<span class="t-${a.central ? 'NEUTRO' : a.nivel}">${CASA}</span>`;
+      const sub = a.central ? 'Abastecimiento permanente' : `${num(a.stock)} de ${num(a.capacidad)} paquetes${a.nivel === 'VACIO' ? ' · vacío' : ''}`;
+      const seccion = (k, titulo, datos, fila) => {
+        const lista = datos.lista.filter(coincide);
+        const filas = lista.length ? lista.map(fila).join('') + (datos.envios > datos.lista.length ? `<li class="vacia">y ${num(datos.envios - datos.lista.length)} envíos más</li>` : '')
+          : `<li class="vacia">${q ? 'Ninguno coincide con la búsqueda.' : 'Ninguno.'}</li>`;
+        return `<details data-k="${a.id}:${k}"${abiertos.has(a.id + ':' + k) ? ' open' : ''}><summary><span>${titulo}</span><b>${num(datos.envios)} envíos · ${num(datos.paquetes)} paq.</b></summary><ul class="alm-lista">${filas}</ul></details>`;
+      };
+      const envio = (extra) => (e) => `<li><b>${e.pedido}</b> · ${e.u} · ${e.q} paq. <code>${rango(e.pedido, e.p0, e.p1)}</code> → (${e.x}, ${e.y}) · ${extra(e)}</li>`;
+      return `<li class="alm-card${elegido ? ' sel' : ''}" data-id="${a.id}">
+        <div class="alm-cab" title="Ver en el mapa">${icono}<span>${esc(a.nombre)}</span>${stock}</div>
+        <div class="sub">${sub} · a bordo de unidades: ${num(a.aBordo)} paq. · vienen a recargar: ${a.recargan.length}</div>
+        ${seccion('transito', 'En tránsito', a.transito, envio((e) => `llega ${horaSim(e.ll)}`))}
+        ${seccion('porSalir', `Salen en las próximas ${h} h`, a.porSalir, envio((e) => `sale ${horaSim(e.sal)} · llega ${horaSim(e.ll)}`))}
+        ${seccion('entregados', `Entregados en las últimas ${h} h`, a.entregados, envio((e) => `entregado ${horaSim(e.hora)}`))}
+      </li>`;
+    }).join('') || '<li class="lista-vacia">Ningún almacén coincide con los filtros.</li>';
+    if (ul._html !== html) { ul.innerHTML = html; ul._html = html; }
+  }
+  $('listaAlmacenesDer').addEventListener('toggle', (ev) => {
+    const d = ev.target;
+    if (!d.dataset || !d.dataset.k) return;
+    if (d.open) abiertos.add(d.dataset.k); else abiertos.delete(d.dataset.k);
+  }, true);
+  $('listaAlmacenesDer').addEventListener('click', (ev) => {
+    const cab = ev.target.closest('.alm-cab');
+    if (!cab) return;
+    const id = cab.closest('.alm-card').dataset.id;
+    if (sel && sel.tipo === 'almacen' && sel.id === id) seleccionar(null);
+    else { quitarFiltroUnidad(); seleccionar({ tipo: 'almacen', id }, true); }       // F05: de la lista al mapa
+  });
+
+  // ================================================================ v0.5: filtros globales del mapa (D05 a D07)
+  function enlazarFiltro(idGrupo, conjunto) {
+    $(idGrupo).addEventListener('click', (ev) => {
+      const b = ev.target.closest('.bf');
+      if (!b) return;
+      if (conjunto.has(b.dataset.v)) conjunto.delete(b.dataset.v); else conjunto.add(b.dataset.v);
+      refrescarFiltros();
+    });
+  }
+  enlazarFiltro('fTipo', filtros.tipo);
+  enlazarFiltro('fCarga', filtros.carga);
+  enlazarFiltro('fAlmacen', filtros.almacen);
+  function refrescarFiltros() {
+    let apagados = 0;
+    for (const [id, conjunto] of [['fTipo', filtros.tipo], ['fCarga', filtros.carga], ['fAlmacen', filtros.almacen]]) {
+      $(id).querySelectorAll('.bf').forEach((b) => {
+        const on = conjunto.has(b.dataset.v);
+        if (!on) apagados++;
+        b.classList.toggle('activo', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+    }
+    $('nFiltros').hidden = apagados === 0;
+    $('nFiltros').textContent = apagados ? `${apagados} ocultos` : '';
+    if (estado && estado.unidades) $('nUnidades').textContent = num(estado.unidades.filter(pasaUnidad).length);
+    actualizarListas();
+    sucio = true;
+  }
+  $('limpiarFiltros').onclick = () => {
+    for (const [c, v] of [[filtros.tipo, ['AUTO', 'MOTO', 'BICI']], [filtros.carga, ['VERDE', 'AMBAR', 'ROJO', 'VACIO']], [filtros.almacen, ['VERDE', 'AMBAR', 'ROJO', 'VACIO']]]) v.forEach((x) => c.add(x));
+    refrescarFiltros();
+  };
+
+  // ================================================================ v0.5: leyendas según la configuración
+  const fmtNum = (v) => Number(v).toLocaleString('es-PE', { maximumFractionDigits: 1 });
+  function aplicarUmbrales(u) {
+    umbrales = u;
+    const ped = u.pedido;
+    const a = fmtNum((1 - ped.verde) * 100), b = fmtNum((1 - ped.ambar) * 100);
+    $('leyendaPedidos').innerHTML = `<span class="nota">Plazo transcurrido</span><span><i class="p VERDE"></i>&lt;${a}%</span><span><i class="p AMBAR"></i>${a}–${b}%</span><span><i class="p ROJO"></i>&gt;${b}% o vencido</span>`;
+    const tramo = (x, nombre) => `<span class="nota">${nombre}</span><span><i class="p VERDE"></i>≥${fmtNum(x.verde)}%</span><span><i class="p AMBAR"></i>≥${fmtNum(x.ambar)}%</span><span><i class="p ROJO"></i>&lt;${fmtNum(x.ambar)}%</span><span><i class="p VACIO"></i>vacío</span>`;
+    $('leyendaCargaLista').innerHTML = tramo(u.carga, 'Carga');
+    $('leyendaGlobal').innerHTML = `<div class="leyenda-mini">${tramo(u.flota, 'Flota')}</div><div class="leyenda-mini">${tramo(u.almacen, 'Almacenes')}</div>`;
+    $('leyCarga').textContent = `Carga de la unidad (barra bajo el ícono): verde desde ${fmtNum(u.carga.verde)}%, ámbar desde ${fmtNum(u.carga.ambar)}%, rojo menos, contorno gris vacía`;
+    $('lsVerde').textContent = `desde ${fmtNum(u.almacen.verde)}%`;
+    $('lsAmbar').textContent = `desde ${fmtNum(u.almacen.ambar)}%`;
+    $('lsRojo').textContent = `menos de ${fmtNum(u.almacen.ambar)}%`;
+  }
+
+  // ================================================================ v0.5: reporte de la última planificación estable (G08, G10)
+  let planReporte = null;
+  async function cargarPlan() {
+    const sec = $('finPlan');
+    sec.hidden = false;
+    sec.innerHTML = '<h3>Última planificación estable</h3><p class="nota">Cargando…</p>';
+    try {
+      const r = await (await fetch('/api/plan')).json();
+      planReporte = r.plan;
+      if (!planReporte) { sec.innerHTML = '<h3>Última planificación estable</h3><p class="nota">No se llegó a calcular ninguna planificación en este escenario.</p>'; return; }
+      const porUnidad = new Map();
+      for (const f of planReporte.filas) { if (!porUnidad.has(f.unidad)) porUnidad.set(f.unidad, []); porUnidad.get(f.unidad).push(f); }
+      const sinParadas = estado.unidades.filter((u) => !porUnidad.has(u.id)).map((u) => u.id);
+      const unidades = [...porUnidad.entries()].map(([id, filas]) => {
+        const ent = filas.filter((f) => f.tipo === 'ENTREGA');
+        return `<details><summary>${iconoUnidad(filas[0].tipoUnidad)}<b>${id}</b><span>${ent.length} ${ent.length === 1 ? 'entrega' : 'entregas'} · ${ent.reduce((s, f) => s + f.cantidad, 0)} paq.</span><small>llega a la última parada ${fmtCorta(filas[filas.length - 1].llegada)}</small></summary>
+          <table><thead><tr><th>#</th><th>Parada</th><th>Referencia</th><th>Destino</th><th>Cant.</th><th>Productos</th><th>Llega</th><th>Sale</th></tr></thead><tbody>${filas.map((f) =>
+            `<tr><td>${f.orden}</td><td>${TIPO_PARADA[f.tipo] || f.tipo}</td><td>${esc(f.ref)}${f.cliente ? ' · ' + esc(f.cliente) : ''}</td><td>(${f.x}, ${f.y})</td><td>${f.cantidad || ''}</td><td><code>${esc(f.productos)}</code></td><td>${fmtCorta(f.llegada)}</td><td>${fmtCorta(f.salida)}</td></tr>`).join('')}</tbody></table></details>`;
+      }).join('');
+      sec.innerHTML = `<h3>Última planificación estable</h3>
+        <p class="nota">Plan calculado el ${esc(fmtFecha(fechaLocal(planReporte.hora)))} (ciclo ${planReporte.ciclo}, ${esc(planReporte.algoritmo)}): itinerario de cada unidad con la hora estimada de llegada y salida de cada parada${planReporte.sinAsignar ? ` · ${planReporte.sinAsignar} partes de pedidos quedaron sin asignar en ese ciclo` : ''}.</p>
+        <div class="acciones-plan"><a class="btn" href="/api/plan.csv" download="ultima-planificacion.csv">Descargar CSV</a><button class="btn" type="button" id="imprimirPlan">Imprimir</button></div>
+        <div class="lista-plan">${unidades || '<p class="nota">Ninguna unidad tenía paradas.</p>'}</div>
+        ${sinParadas.length ? `<p class="nota">Sin paradas en ese plan: ${sinParadas.join(', ')}.</p>` : ''}`;
+      $('imprimirPlan').onclick = imprimirPlan;
+    } catch (e) {
+      sec.innerHTML = '<h3>Última planificación estable</h3><p class="nota">No se pudo obtener la planificación: ' + esc(e.message) + '</p>';
+    }
+  }
+  const TIPO_PARADA = { ENTREGA: 'Entrega', RECARGA: 'Recarga', REFRIGERIO: 'Refrigerio' };
+  function imprimirPlan() {
+    if (!planReporte) return;
+    const w = window.open('', '_blank');
+    if (!w) { avisar('El navegador bloqueó la ventana de impresión; usa Descargar CSV.', 'alerta'); return; }
+    const filas = planReporte.filas.map((f) => `<tr><td>${f.unidad}</td><td>${f.orden}</td><td>${TIPO_PARADA[f.tipo] || f.tipo}</td><td>${esc(f.ref)}</td><td>${esc(f.cliente)}</td><td>(${f.x}, ${f.y})</td><td>${f.cantidad || ''}</td><td>${esc(f.productos)}</td><td>${fmtCorta(f.llegada)}</td><td>${fmtCorta(f.salida)}</td></tr>`).join('');
+    w.document.write(`<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Última planificación estable</title>
+      <style>body{font:12px system-ui,sans-serif;margin:20px}h1{font-size:16px;margin:0 0 4px}p{color:#555;margin:0 0 12px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:3px 5px;text-align:left}th{background:#f1f5f9}</style></head>
+      <body><h1>RUTAPAQ · Última planificación estable</h1><p>Plan del ${esc(fmtFecha(fechaLocal(planReporte.hora)))} · ciclo ${planReporte.ciclo} · ${esc(planReporte.algoritmo)} · escenario ${planReporte.escenario === 'COLAPSO' ? 'hasta el colapso' : 'simulación de 5 días'}</p>
+      <table><thead><tr><th>Unidad</th><th>#</th><th>Parada</th><th>Referencia</th><th>Cliente</th><th>Destino</th><th>Cant.</th><th>Productos</th><th>Llega</th><th>Sale</th></tr></thead><tbody>${filas}</tbody></table></body></html>`);
+    w.document.close();
+    w.focus();
+    w.print();
+  }
+
+
+  // ================================================================ v0.5: pantalla Configuración (B01, B02, B04, B06 a B09)
+  let cfgDatos = null;
+  let cfgGuardando = false;
+  const BADGE = { AHORA: 'Ahora', CICLO: 'Siguiente ciclo', INICIO: 'Al iniciar' };
+  const camposCfg = () => (cfgDatos ? cfgDatos.secciones.flatMap((s) => s.campos) : []);
+  function abrirConfig() {
+    $('navSimulador').classList.remove('activo'); $('navSimulador').removeAttribute('aria-current');
+    $('navConfig').classList.add('activo'); $('navConfig').setAttribute('aria-current', 'page');
+    $('vistaConfig').hidden = false;
+    cargarConfig();
+  }
+  function cerrarConfig() {
+    if (hayCambiosCfg() && !window.confirm('Hay cambios sin guardar en la configuración. ¿Salir sin guardarlos?')) return;
+    $('navConfig').classList.remove('activo'); $('navConfig').removeAttribute('aria-current');
+    $('navSimulador').classList.add('activo'); $('navSimulador').setAttribute('aria-current', 'page');
+    $('vistaConfig').hidden = true;
+    sucio = true;
+  }
+  $('navConfig').onclick = abrirConfig;
+  $('navSimulador').onclick = () => { if (!$('vistaConfig').hidden) cerrarConfig(); };
+  $('cfgCerrar').onclick = cerrarConfig;
+
+  async function cargarConfig() {
+    try {
+      cfgDatos = await (await fetch('/api/configuracion')).json();
+      $('cfgAviso').hidden = true;
+      dibujarConfig();
+    } catch (e) {
+      $('cfgSecciones').innerHTML = '<p class="nota">No se pudo leer la configuración: ' + esc(e.message) + '</p>';
+    }
+  }
+  function entradaCampo(c) {
+    const dis = `data-clave="${c.clave}"`;
+    if (c.tipo === 'PUNTO') {
+      const [x, y] = String(c.valor).split(',');
+      return `<span class="unidad">x</span><input class="eje" type="number" min="0" step="1" value="${esc(x)}" ${dis} data-eje="x" aria-label="${esc(c.etiqueta)} x">`
+        + `<span class="unidad">y</span><input class="eje" type="number" min="0" step="1" value="${esc(y)}" ${dis} data-eje="y" aria-label="${esc(c.etiqueta)} y"><span class="unidad">${esc(c.unidad || '')}</span>`;
+    }
+    if (c.tipo === 'HORA') return `<input type="time" step="60" value="${esc(c.valor)}" ${dis} aria-label="${esc(c.etiqueta)}">`;
+    if (c.tipo === 'BOOLEANO') return `<input type="checkbox" ${c.valor === 'true' ? 'checked' : ''} ${dis} aria-label="${esc(c.etiqueta)}"><span class="unidad">${c.valor === 'true' ? 'Sí' : 'No'}</span>`;
+    return `<input type="number" min="${c.min}" max="${c.max}" step="${c.paso}" value="${esc(c.valor)}" ${dis} aria-label="${esc(c.etiqueta)}">`
+      + (c.unidad ? `<span class="unidad">${esc(c.unidad)}</span>` : '');
+  }
+  function htmlCampo(c) {
+    const ancho = c.tipo === 'PUNTO' || (c.ayuda && c.ayuda.length > 40) ? ' ancho' : '';
+    return `<label class="cfg-campo${ancho}" data-campo="${c.clave}">
+      <span class="cfg-et">${esc(c.etiqueta)} <i class="badge ${c.aplica}" title="${esc(c.aplicaTexto)}">${BADGE[c.aplica]}</i></span>
+      <span class="cfg-entrada">${entradaCampo(c)}</span>
+      <small class="cfg-error" hidden></small>
+      ${c.ayuda ? `<small class="cfg-ayuda">${esc(c.ayuda)}</small>` : ''}
+      ${c.valor !== c.defecto ? `<small class="cfg-defecto">Por defecto: ${esc(c.tipo === 'BOOLEANO' ? (c.defecto === 'true' ? 'sí' : 'no') : c.defecto)}</small>` : ''}
+    </label>`;
+  }
+  function dibujarConfig() {
+    const html = cfgDatos.secciones.map((s) => {
+      const grupos = [];
+      for (const c of s.campos) {
+        const g = c.grupo || '';
+        if (!grupos.length || grupos[grupos.length - 1].g !== g) grupos.push({ g, campos: [] });
+        grupos[grupos.length - 1].campos.push(c);
+      }
+      const cuerpo = grupos.map((gr) => gr.g
+        ? `<div class="cfg-grupo"><h4>${esc(gr.g)}</h4><div class="cfg-campos">${gr.campos.map(htmlCampo).join('')}</div></div>`
+        : `<div class="cfg-campos">${gr.campos.map(htmlCampo).join('')}</div>`).join('');
+      return `<section class="cfg-card" data-seccion="${s.id}"><h3>${esc(s.titulo)}<span class="item">${esc(s.item)}</span></h3>
+        <p class="nota">${esc(s.nota)}</p>${cuerpo}</section>`;
+    }).join('');
+    $('cfgSecciones').innerHTML = html;
+    actualizarBotonesCfg();
+  }
+  /** Valor que muestra la pantalla para una clave (x,y en los puntos; true/false en los booleanos). */
+  function leerCampoCfg(c) {
+    const ins = [...$('cfgSecciones').querySelectorAll(`[data-clave="${c.clave}"]`)];
+    if (!ins.length) return c.valor;
+    if (c.tipo === 'PUNTO') return `${ins.find((i) => i.dataset.eje === 'x').value.trim()},${ins.find((i) => i.dataset.eje === 'y').value.trim()}`;
+    if (c.tipo === 'BOOLEANO') return ins[0].checked ? 'true' : 'false';
+    return ins[0].value.trim();
+  }
+  const mismoValor = (c, a, b) => (c.tipo === 'ENTERO' || c.tipo === 'DECIMAL') && a !== '' && b !== '' && !isNaN(a) && !isNaN(b) ? Number(a) === Number(b) : a === b;
+  function cambiosCfg() {
+    const r = {};
+    for (const c of camposCfg()) { const v = leerCampoCfg(c); if (!mismoValor(c, v, c.valor)) r[c.clave] = v; }
+    return r;
+  }
+  const hayCambiosCfg = () => !$('vistaConfig').hidden && Object.keys(cambiosCfg()).length > 0;
+  function actualizarBotonesCfg() {
+    const cambios = cambiosCfg();
+    for (const c of camposCfg()) {
+      const el = $('cfgSecciones').querySelector(`[data-campo="${c.clave}"]`);
+      if (el) el.classList.toggle('cambiado', c.clave in cambios);
+    }
+    const n = Object.keys(cambios).length;
+    $('cfgGuardar').disabled = n === 0 || cfgGuardando;
+    $('cfgDescartar').disabled = n === 0;
+    $('cfgGuardar').textContent = n ? `Guardar (${n})` : 'Guardar';
+  }
+  $('cfgSecciones').addEventListener('input', (ev) => {
+    const campo = ev.target.closest('.cfg-campo');
+    if (campo) { campo.classList.remove('error'); campo.querySelector('.cfg-error').hidden = true; }
+    if (ev.target.type === 'checkbox') ev.target.nextElementSibling.textContent = ev.target.checked ? 'Sí' : 'No';
+    actualizarBotonesCfg();
+  });
+  $('cfgSecciones').addEventListener('change', actualizarBotonesCfg);
+  $('cfgDescartar').onclick = () => dibujarConfig();
+
+  /** Diálogo de confirmación: qué se aplica ahora, en el siguiente ciclo y al iniciar la próxima simulación. */
+  let accionCfg = null;
+  function resumenCfg(claves, titulo, boton, accion) {
+    const porClave = new Map(camposCfg().map((c) => [c.clave, c]));
+    const seccionDe = new Map(cfgDatos.secciones.flatMap((s) => s.campos.map((c) => [c.clave, s.titulo])));
+    const enCurso = estado && (estado.estado === 'EJECUTANDO' || estado.estado === 'PAUSADA');
+    const grupos = { AHORA: [], CICLO: [], INICIO: [] };
+    for (const k of claves) { const c = porClave.get(k); if (c) grupos[c.aplica].push((c.grupo || seccionDe.get(k)) + ' · ' + c.etiqueta); }
+    const textos = enCurso
+      ? { AHORA: 'Se aplican ahora en la simulación en curso', CICLO: 'Se aplican en el siguiente ciclo de planificación', INICIO: 'Se aplican al iniciar la próxima simulación' }
+      : { AHORA: 'Se aplican de inmediato', CICLO: 'Se aplican de inmediato', INICIO: 'Se aplican al iniciar la próxima simulación' };
+    $('cfgConfTitulo').textContent = titulo;
+    $('cfgResumen').innerHTML = `<p>Se guardará en <code>config.properties</code>. ${enCurso ? 'Hay una simulación en curso: el cambio afecta a todos los navegadores que la están viendo.' : 'Afecta a todos los navegadores conectados.'}</p>`
+      + Object.entries(grupos).filter(([, l]) => l.length).map(([a, l]) => `<h4><i class="badge ${a}">${BADGE[a]}</i>${textos[a]}</h4><ul>${l.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`).join('');
+    $('cfgSi').textContent = boton;
+    accionCfg = accion;
+    $('modalCfg').showModal();
+  }
+  $('cfgGuardar').onclick = () => {
+    const cambios = cambiosCfg();
+    if (!Object.keys(cambios).length) return;
+    resumenCfg(Object.keys(cambios), '¿Guardar la configuración?', 'Guardar', () => enviarCfg('/api/configuracion', cambios));
+  };
+  $('cfgRestaurar').onclick = () => {
+    const distintos = camposCfg().filter((c) => !mismoValor(c, c.valor, c.defecto)).map((c) => c.clave);
+    if (!distintos.length) { avisar('La configuración ya tiene los valores por defecto.'); return; }
+    resumenCfg(distintos, '¿Restaurar los valores por defecto?', 'Restaurar', () => enviarCfg('/api/configuracion/restaurar', {}));
+  };
+  $('cfgNo').onclick = () => $('modalCfg').close();
+  $('cfgSi').onclick = () => { $('modalCfg').close(); if (accionCfg) accionCfg(); };
+  async function enviarCfg(url, datos) {
+    cfgGuardando = true;
+    actualizarBotonesCfg();
+    try {
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(datos).toString() });
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 400 && j.errores) {
+        for (const [k, msg] of Object.entries(j.errores)) {
+          const el = $('cfgSecciones').querySelector(`[data-campo="${k}"]`);
+          if (el) { el.classList.add('error'); const e = el.querySelector('.cfg-error'); e.textContent = msg; e.hidden = false; }
+        }
+        const primero = $('cfgSecciones').querySelector('.cfg-campo.error');
+        if (primero) primero.scrollIntoView({ block: 'center' });
+        avisar('No se guardó: revisa los campos marcados en rojo.', 'error');
+        return;
+      }
+      if (!r.ok) throw new Error(j.error || r.statusText);
+      const partes = [];
+      if (j.ahora.length) partes.push(`ahora: ${j.ahora.length}`);
+      if (j.ciclo.length) partes.push(`en el siguiente ciclo: ${j.ciclo.length}`);
+      if (j.inicio.length) partes.push(`al iniciar la próxima simulación: ${j.inicio.length}`);
+      avisar(j.cambios ? `Configuración guardada (${partes.join(' · ')}).` : 'No había cambios que guardar.');
+      $('cfgArchivo').textContent = j.archivo || 'config.properties';
+      await cargarConfig();
+      await cargarConfigCliente();
+    } catch (e) {
+      avisar('No se pudo guardar la configuración: ' + e.message, 'error');
+    } finally {
+      cfgGuardando = false;
+      if (cfgDatos) actualizarBotonesCfg();
+    }
+  }
+  /** Otro navegador guardó la configuración: se recarga la pantalla, o se avisa si aquí hay cambios sin guardar. */
+  function configCambioExterno() {
+    if ($('vistaConfig').hidden || cfgGuardando) return;
+    if (!hayCambiosCfg()) { cargarConfig(); return; }
+    $('cfgAviso').textContent = 'Otro navegador guardó cambios en la configuración. Tus cambios aún no se guardaron; si los descartas verás los valores nuevos.';
+    $('cfgAviso').hidden = false;
+  }
+  $('cfgDescartar').addEventListener('click', () => { if (!$('cfgAviso').hidden) cargarConfig(); });
 
   // ================================================================ arranque
   let temaGuardado = null;

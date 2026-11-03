@@ -20,11 +20,15 @@ public final class Unidad {
     public double km;
     public boolean enMantenimiento;                        // v02: día de mantenimiento preventivo
     public Averia averia;                                  // v03: avería vigente (null si la unidad está operativa)
+    /** v0.5: almacén donde hizo su última recarga (de allí sale lo que lleva a bordo) y cuándo salió de él. */
+    public String origenId;
+    public double salidaOrigen = -1;                       // segundos simulados; -1 si aún no sale de ningún almacén
 
     public Unidad(String id, TipoUnidad tipo, Nodo inicio) {
         this.id = id;
         this.tipo = tipo;
         this.nodo = inicio;
+        this.origenId = "ALM-CENTRAL";                     // todas salen del almacén central (P&R pregunta 10)
     }
 
     public double x() {

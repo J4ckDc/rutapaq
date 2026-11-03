@@ -1,4 +1,4 @@
-# RUTAPAQ v0.4.1: servidor, simulación y visualizador con rutapaq-planner (ALNS y GA)
+# RUTAPAQ v0.5.0: servidor, simulación y visualizador con rutapaq-planner (ALNS y GA)
 
 Un solo proceso Java 17 **sin dependencias en ejecución**. Contiene el código de
 **rutapaq-planner v2.0** (`pe.pucp.paqrap.planner`: ALNS_PAQRAP, HGS_PAQRAP, EvaluadorItinerario y
@@ -14,6 +14,46 @@ en la interfaz.
 
 Alcance de la v0.4.1: averías solo manuales (indicación del profesor) y ajustes de la interfaz pedidos en la
 revisión (tiempos de la barra superior, stock de los almacenes en %, color por tipo de avería y menú en español).
+
+Alcance de la v0.5.0: revisión de la v0.4.1 (rutapaqS12v1) frente a la situación auténtica, la P&R y los ítems de
+evaluación (equipo de 4: se cumplen los ítems Sí3 y Sí4). Las decisiones del equipo están en el documento
+"Historial de cambios y decisiones" del proyecto.
+
+## Cambios de la v0.5.0 respecto de la v0.4.1
+
+| # | Cambio | Rúbrica / P&R | Dónde |
+|---|---|---|---|
+| 1 | **Flota en una sola fuente configurable**: capacidad, velocidad y costo por km de cada tipo se leen de las claves `flota.auto.*`, `flota.moto.*`, `flota.bici.*`. `TipoUnidad` (simulación) ya no tiene valores propios: los toma de `TipoVehiculo` (planificador), así nunca difieren. Prepara el cambio de velocidad en caliente (pendiente). | B04; P&R 6, 15 y 16 | `planner/model/TipoVehiculo`, `app/modelo/TipoUnidad`, `Config`, `Configuracion`, `planner.properties` |
+| 2 | **Duración del mantenimiento por tipo** (`mantenimiento.horas.auto`, `.moto`, `.bici`), por ahora 24 h para todos como en el archivo del profesor. Borrador de la P&R aún no confirmado: bicicleta hasta las 07:00 (7 h), moto 24 h, auto 48 h. | P&R 19 | `app/datos/PlanMantenimiento`, `Simulacion` |
+| 3 | **Recarga configurable** (`recarga.soloLoNecesario`, `false` por defecto): la unidad se sigue llenando hasta su capacidad (decisión del equipo tras comparar ambas formas: cargar solo lo necesario costó 2–9 % más y dio más vencidos con demanda alta). | P&R 20 | `Simulacion` |
+| 4 | **Semáforo + vacío**: nuevo nivel `VACIO` (gris). Regla: el rojo siempre es peligro. Almacenes: verde bastante stock, ámbar poco, rojo muy poco, vacío 0. La carga de una unidad usa el mismo criterio (antes una unidad llena era roja). | B06, C21, C27, E03, E19 | `Indicadores`, `config.properties` |
+| 5 | **Indicadores globales** en el panel izquierdo: ocupación de la flota en servicio y stock de los almacenes intermedios en conjunto, con semáforo + vacío. | G01 a G04 | `index.html`, `app.js`, `snapshotJson` |
+| 6 | **Filtros globales del mapa** en el panel derecho: por tipo de unidad, por semáforo + vacío de la carga de las unidades y del stock de los almacenes. | D05, D06, D07 | `index.html`, `app.js` |
+| 7 | **Pestaña Unidades**: todas las unidades con carga (número, % y semáforo + vacío), destino inmediato (llega / sale, en minutos), origen (almacén y hora de salida); orden por ocupación, hora de salida o de llegada (asc./desc.); búsqueda por minutos al destino o al origen, a la llegada o a la salida; al elegir una se ven sus envíos y productos. Enlace bidireccional con el mapa. | E02 a E07, E13 a E15, F01 | `app.js`, horarios en `Simulacion.horarios()` |
+| 8 | **Pestaña Almacenes**: stock con semáforo + vacío, paquetes a bordo, envíos en tránsito, que salen en las próximas 4 h y entregados en las últimas 4 h (`panel.ventanaHoras`). Enlace bidireccional con el mapa. | E18 a E22, F05 | `app.js`, `snapshotJson`, historial `entregasRecientes` |
+| 9 | **Envíos y productos**: cada pedido muestra sus envíos (unidad, cantidad, identificadores de producto `P12-1 a P12-5`, almacén y hora de salida, hora de llegada; varias unidades si se reparte). Elegir un envío resalta solo la ruta de esos productos; elegir el pedido, las de todos. | E31, F02, F03 | `Simulacion.productos()`, `app.js` |
+| 10 | **Reporte de la última planificación estable** al terminar los 5 días o al colapsar: itinerario de cada unidad con horas estimadas, productos, descarga en CSV e impresión. `GET /api/plan` y `GET /api/plan.csv`. | G08, G10 | `Simulacion.guardarPlan()/planJson()/planCsv()`, `Servidor`, `app.js` |
+| 11 | **Mapa**: el ícono de la unidad gira según la dirección en que avanza (derecha, izquierda, arriba, abajo); barra de carga con semáforo + vacío bajo el ícono (el color del ícono sigue siendo su estado); zoom continuo con la rueda y los botones, sin saltos; centrado animado. | C08, C27, C30 | `app.js` |
+| 12 | **Interfaz**: paneles contraídos al inicio; "Tablero" pasa a "Panel de Control"; las leyendas del semáforo (pedidos, carga, flota, almacenes) se arman con los umbrales configurados (`/api/config` → `semaforo`). | E01, C07, RNF d | `index.html`, `app.js`, `Servidor` |
+| 13 | **Planificador en segundo plano** (servidor). El ciclo se divide en preparar (con el estado vigente), ejecutar (el ALNS en el hilo "planificador", con una copia del mapa) y aplicar. Mientras el ALNS trabaja, la simulación sigue avanzando y publicando: antes el estado se bloqueaba hasta 2 s en cada ciclo y las unidades saltaban; ahora la peor respuesta de `/api/estado` medida con junio 2028 fue 61 ms. El plan se calcula para el instante en que llegará (t + Ta estimado × K). Al aplicarlo, una unidad que se averió o entró a mantenimiento mientras tanto no recibe su ruta, y a ningún pedido se le asigna más de lo que le falta. Las pruebas y `probar` siguen en modo síncrono (mismos resultados que antes). | C29, G06 | `Simulacion.preparar()/ejecutar()/aplicar()`, `MapaReticula.copia()` |
+| 14 | **Criterio C del colapso con el Sa real**: Sa = Sc / K (15 s en 5 días, 6 s en colapso). Colapsa si una ejecución tarda Sa o más, o si toca la siguiente y la anterior aún no termina. `ien.saSegundos` queda solo para el banco del IEN. El reporte final muestra Ta, Sc y Sa. | A17 a A19 | `Simulacion` (`saMs`), `app.js` |
+| 15 | El refrigerio nunca empieza antes de su ventana (1 h después del cambio de turno): si la unidad llega antes de lo estimado, espera. | Situación auténtica | `Simulacion.inicioRefrigerio()` |
+| 16 | Al elegir una unidad o un almacén en el mapa se abre el panel derecho (los paneles empiezan contraídos) en su pestaña, con la fila resaltada. | F01, F05 | `app.js` |
+| 17 | **Pantalla Configuración** (menú izquierdo): almacenes (ubicación y capacidad), flota por tipo (cantidad, capacidad, velocidad, costo), averías tipo 1, 2 y 3 y trasvase, mantenimiento por tipo y rangos del semáforo. Todos los parámetros viven en `config.properties`; la pantalla los valida, los guarda allí (solo las líneas que cambian, conservando los comentarios) y los aplica: semáforo y averías **ahora**, velocidad **en el siguiente ciclo de planificación** (P&R 15 y 16: velocidad en caliente por tipo), y almacenes, cantidad, capacidad, costo y mantenimiento **al iniciar la próxima simulación** (P&R 9). Pide confirmación porque afecta a todos los navegadores, que se actualizan solos. Botón para restaurar los valores de fábrica. `GET/POST /api/configuracion`, `POST /api/configuracion/restaurar`. | B02, B04, B06, B07, B08, B09 | `app/CatalogoConfiguracion`, `Config.guardar()`, `Servidor`, `index.html`, `app.js` |
+| 18 | 9 pruebas nuevas: flota configurable, mantenimiento por tipo, semáforo con vacío, recarga, envíos/entregas/último plan, planificador en segundo plano, criterio C con el Sa real, guardado y aplicación de la configuración, y su validación. | | `src/test/java/.../app/sim/V05Test.java` |
+| 19 | `compilar-sin-maven.cmd` para compilar en Windows sin Maven. | | |
+| 20 | **Mapa configurable**: `ien.mapaAnchoKm` e `ien.mapaAltoKm` (70 x 50 por defecto) pasan a `config.properties` y a la pantalla Configuración (sección "Mapa de la ciudad", se aplica al iniciar la próxima simulación). El visualizador ya no tiene 70 x 50 fijo: dibuja el mapa de la simulación en curso (`mapa` en el estado) o, sin simulación, el configurado (`/api/config`). El registro de pedidos valida contra ese mapa, los bloqueos ya no dependen de una retícula fija y la simulación ignora los nodos de bloqueo que quedan fuera; un almacén fuera del mapa se rechaza al guardar y al iniciar, con un mensaje claro. | B01; P&R 4 | `config.properties`, `CatalogoConfiguracion`, `Servidor`, `Simulacion`, `Formato`, `app.js` |
+| 21 | **Fecha de inicio sincronizada**: el campo de fecha y hora muestra el inicio de la simulación en curso al abrir la página (otra pestaña, incógnito u otro dispositivo) y se actualiza cuando otro navegador inicia una nueva, igual que el selector 5 Días / Colapso. | C02, C05, G06 | `app.js` |
+| 22 | Comentarios de `config.properties` y `Config` actualizados: el archivo junto al .jar es el único lugar que se edita; `planner.properties` y la copia empaquetada son los valores de fábrica. | | `config.properties`, `Config` |
+
+Verificación: las 49 pruebas pasan (38 de antes, 9 nuevas y 2 del mapa configurable). Con los valores por defecto, los 5 días desde el
+01/01/2026 sin interfaz dan lo mismo que antes (76 pedidos recibidos, 74 entregados, S/ 10 184). En el servidor,
+con junio 2028, el reloj simulado avanza parejo (K ≈ 240) y el estado responde en milisegundos aunque cada ejecución
+del ALNS dure 2 s. Recorrido en el navegador a 1366×768 y 1920×1080, tema claro y oscuro: pestañas, filtros,
+indicadores, envíos con productos, enlace mapa ↔ listas, reporte final de 5 días y de colapso, CSV.
+
+Al desplegar en la VM, copiar también el `config.properties` nuevo: `semaforo.carga.*` cambió de sentido (antes una
+unidad llena era roja; ahora verde) y hay claves nuevas.
 
 ## Cambios de la v0.4.1 respecto de la v04
 
@@ -121,10 +161,26 @@ unidades con su plan (v01: 31 de 37 unidades quedaban sin tareas).
 
 ## Ejecutar
 
+Requisito: **JDK 17 o superior** (por ejemplo Eclipse Temurin 17 o 21). Se comprueba con `java -version`.
+
+1. Abrir la carpeta `rutapaq` en VS Code y abrir una terminal (Terminal → Nueva terminal). La terminal debe quedar
+   en esta carpeta, la que tiene `rutapaq.jar`, `config.properties` y `datos/`.
+2. Ejecutar:
+
+   ```bash
+   java -jar rutapaq.jar             # luego abrir http://localhost:8080 en el navegador
+   ```
+
+   Se detiene con Ctrl + C en la terminal.
+3. Otros dispositivos de la misma red: `http://<IP-de-la-PC>:8080` (el firewall debe permitir el puerto).
+   Si el puerto 8080 está ocupado, cambiar `servidor.puerto` en `config.properties`.
+
+Si se modifica el código, recompilar antes de volver a ejecutar:
+
 ```bash
-mvn package                       # o ./compilar-sin-maven.sh
-cp target/rutapaq.jar .
-java -jar rutapaq.jar             # http://localhost:8080
+.\compilar-sin-maven.cmd          # Windows (CMD o PowerShell)
+./compilar-sin-maven.sh           # Linux, macOS o Git Bash
+mvn package && cp target/rutapaq.jar .   # con Maven (también corre las pruebas)
 ```
 
 En el navegador: elegir la fecha y hora de inicio (hay datos de enero 2026 a diciembre 2028) y
@@ -168,7 +224,12 @@ cumple con la hora de llegada, cada entrega toma 1 h, el refrigerio dura 1 h, la
 tiempo y los intermedios vuelven a 1 000 unidades a las 23:59:59.
 
 Colapso (escenario hasta el colapso, v04): **P** cuando un pedido llega a su límite sin entrega; **C** cuando una
-ejecución del planificador tarda `ien.saSegundos` o más. Sin colapso, termina al acabarse los datos de ventas.
+ejecución del planificador tarda Sa o más (v0.5: Sa real = Sc / K; antes se usaba `ien.saSegundos`). Sin colapso,
+termina al acabarse los datos de ventas.
+
+Planificador en segundo plano (v0.5): en el servidor, cada ciclo se prepara con el estado vigente, el ALNS corre en
+su propio hilo y el plan se aplica cuando termina; mientras tanto la simulación sigue. En `probar` y en las pruebas
+se planifica de forma síncrona, en el mismo instante simulado.
 
 Mantenimiento preventivo (`datos/mant.preventivo.*`): una unidad deja de recibir rutas cuando su
 mantenimiento empieza antes de que termine el horizonte de ruta (`planificador.horizonteRutaHoras`, 8 h),
@@ -210,8 +271,8 @@ Las averías solo se registran de forma manual desde el visualizador (v0.4.1); n
 
 | Archivo | Qué contiene |
 |---|---|
-| `planner.properties` (de rutapaq-planner, sin cambios) | Mapa, almacenes, flota, Sc, Sa, P, parámetros de ALNS y GA |
-| `config.properties` | Servidor, algoritmo, escenarios (fecha y hora propuestas, duración del 5D), averías (`averia.tipo1.horas`, `averia.enLugar.horas`, `averia.tipo3.diasMinimos`, `averia.tipo3.horaRetorno`, `averia.trasvase.*`), frecuencia de publicación y semáforo (`semaforo.plazo.*`, `semaforo.almacen.*`, `semaforo.carga.*`, `semaforo.pedido.*`) |
+| `planner.properties` (de rutapaq-planner) | Mapa, almacenes, flota (cantidad y, desde la v0.5.0, `flota.*.capacidad`, `.velocidadKmh`, `.costoKm`), Sc, Sa, P, parámetros de ALNS y GA |
+| `config.properties` | Servidor, algoritmo, escenarios (fecha y hora propuestas, duración del 5D), averías (`averia.tipo1.horas`, `averia.enLugar.horas`, `averia.tipo3.diasMinimos`, `averia.tipo3.horaRetorno`, `averia.trasvase.*`), frecuencia de publicación, semáforo (`semaforo.plazo.*`, `semaforo.almacen.*`, `semaforo.carga.*`, `semaforo.flota.*`, `semaforo.pedido.*`) y, desde la v0.5.0, `panel.ventanaHoras`, `recarga.soloLoNecesario` y `mantenimiento.horas.*` |
 
 Un `config.properties` junto al jar sobrescribe cualquier clave de los dos archivos, sin recompilar.
 

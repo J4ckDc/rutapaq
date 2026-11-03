@@ -25,6 +25,17 @@ public final class MapaReticula {
         this.bloqueado = new boolean[ancho * alto];
     }
 
+    /**
+     * v0.5: copia independiente (mismas dimensiones y bloqueos). La simulacion se la entrega al planificador cuando
+     * este corre en otro hilo, para que los bloqueos que empiezan o terminan mientras planifica no lo afecten.
+     */
+    public MapaReticula copia() {
+        MapaReticula c = new MapaReticula(ancho - 1, alto - 1);
+        System.arraycopy(bloqueado, 0, c.bloqueado, 0, bloqueado.length);
+        c.version = version;
+        return c;
+    }
+
     public int getAncho() {
         return ancho;
     }

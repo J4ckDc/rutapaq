@@ -21,13 +21,13 @@
     <nav aria-label="Secciones">
       <button class="nav-item" disabled title="Disponible en una próxima versión">
         <svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></svg>
-        <span>Tablero</span>
+        <span>Panel de Control</span>
       </button>
       <button class="nav-item" disabled title="Disponible en una próxima versión">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M5.2 18.8l2.1-2.1M16.7 7.3l2.1-2.1"/></svg>
         <span>Tiempo real</span>
       </button>
-      <button class="nav-item activo" aria-current="page">
+      <button class="nav-item activo" id="navSimulador" aria-current="page">
         <svg viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>
         <span>Simulador de rutas</span>
       </button>
@@ -39,12 +39,17 @@
         <svg viewBox="0 0 24 24"><path d="M4 10l8-6 8 6v10H4z"/><path d="M10 20v-6h4v6"/></svg>
         <span>Almacenes</span>
       </button>
+      <!-- v0.5: pantalla Configuración (rúbrica B01, B02, B04, B06 a B09) -->
+      <button class="nav-item" id="navConfig" title="Mapa, almacenes, flota, averías, mantenimiento y semáforo">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        <span>Configuración</span>
+      </button>
     </nav>
     <div class="menu-pie">
       <button class="icono-btn" id="plegarMenu" aria-label="Plegar menú" title="Plegar menú">
         <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
       </button>
-      <span class="version">v0.4.1</span>
+      <span class="version">v0.5.0</span>
     </div>
   </aside>
 
@@ -104,15 +109,30 @@
     </div>
 
     <!-- panel izquierdo: indicadores -->
-    <section class="panel izq" id="panelIzq" aria-label="Indicadores">
+    <section class="panel izq" id="panelIzq" aria-label="Indicadores" hidden>
       <button class="plegar" data-panel="panelIzq" aria-label="Ocultar indicadores" title="Ocultar panel">
         <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
       </button>
+      <!-- v0.5: indicadores globales (rúbrica G01 a G04) -->
+      <div class="bloque" id="bloqueGlobal">
+        <h3>Indicadores globales</h3>
+        <div class="global" title="Paquetes a bordo de las unidades en servicio (sin mantenimiento ni averías) respecto de su capacidad total">
+          <div class="global-cab"><span>Ocupación de la flota</span><b id="gFlota" class="t-NEUTRO">—</b></div>
+          <div class="riel-g"><span id="gFlotaBarra"></span></div>
+          <small id="gFlotaDet">—</small>
+        </div>
+        <div class="global" title="Stock de los almacenes intermedios en conjunto respecto de su capacidad máxima (el central tiene abastecimiento permanente)">
+          <div class="global-cab"><span>Stock de almacenes intermedios</span><b id="gAlm" class="t-NEUTRO">—</b></div>
+          <div class="riel-g"><span id="gAlmBarra"></span></div>
+          <small id="gAlmDet">—</small>
+        </div>
+        <div id="leyendaGlobal"></div>
+      </div>
       <div class="bloque">
         <h3>Inventario de almacenes</h3>
         <div class="cab-almacenes" aria-hidden="true"><span>Almacén</span><span>Stock</span></div>
         <ul class="almacenes" id="listaAlmacenes"></ul>
-        <div class="leyenda-mini" title="Stock de los almacenes intermedios respecto de su capacidad máxima"><span class="nota">Stock</span><span><i class="p VERDE"></i><span id="lsVerde">desde 30%</span></span><span><i class="p AMBAR"></i><span id="lsAmbar">desde 10%</span></span><span><i class="p ROJO"></i><span id="lsRojo">menos de 10%</span></span></div>
+        <div class="leyenda-mini" title="Stock de los almacenes intermedios respecto de su capacidad máxima"><span class="nota">Stock</span><span><i class="p VERDE"></i><span id="lsVerde">desde 30%</span></span><span><i class="p AMBAR"></i><span id="lsAmbar">desde 10%</span></span><span><i class="p ROJO"></i><span id="lsRojo">menos de 10%</span></span><span><i class="p VACIO"></i><span>vacío</span></span></div>
       </div>
       <div class="bloque" id="bloqueLinea">
         <h3>Línea de tiempo · 5 días</h3>
@@ -138,7 +158,7 @@
         <ul class="ley">
           <li><span class="sim cian"><svg class="ico-u" viewBox="-10 -8 20 14"><path d="M-8.5 2.5v-4l3-1 2.2-3.5h7l2.8 3.5 2 1v4z" fill="currentColor" stroke="none"/><circle cx="-4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/><circle cx="4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/></svg><svg class="ico-u" viewBox="-10 -8 20 14"><circle cx="-5.5" cy="3" r="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="5.5" cy="3" r="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M-6.5 .5l2-2.7 4-.6 2-1.4h2.5L6-.8 4 1.6h-6z" fill="currentColor" stroke="none"/><path d="M4.6-1l.9 4M3-4.2l.8-2.4H6" fill="none" stroke="currentColor" stroke-width="1.5"/></svg><svg class="ico-u" viewBox="-10 -8 20 14"><circle cx="-5" cy="2.5" r="3.2" fill="none" stroke="currentColor" stroke-width="1.2"/><circle cx="5" cy="2.5" r="3.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M-5 2.5l4-5h5l1 5M-1-2.5l1.5 5h-5.5M-2.5-5H0M4-2.5l-.5-3.5" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></span><span>Auto, moto y bicicleta</span></li>
           <li><span class="sim violeta"><svg class="ico-u" viewBox="-10 -8 20 14"><path d="M-8.5 2.5v-4l3-1 2.2-3.5h7l2.8 3.5 2 1v4z" fill="currentColor" stroke="none"/><circle cx="-4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/><circle cx="4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/></svg></span><span>En refrigerio (1 h)</span></li>
-          <li><span class="sim gris"><svg class="ico-u" viewBox="-10 -8 20 14"><path d="M-8.5 2.5v-4l3-1 2.2-3.5h7l2.8 3.5 2 1v4z" fill="currentColor" stroke="none"/><circle cx="-4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/><circle cx="4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/></svg></span><span>En mantenimiento (todo el día)</span></li>
+          <li><span class="sim gris"><svg class="ico-u" viewBox="-10 -8 20 14"><path d="M-8.5 2.5v-4l3-1 2.2-3.5h7l2.8 3.5 2 1v4z" fill="currentColor" stroke="none"/><circle cx="-4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/><circle cx="4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/></svg></span><span>En mantenimiento preventivo</span></li>
           <li><span class="sim"><i class="dist-ley t1">1</i><i class="dist-ley t2">2</i><i class="dist-ley t3">3</i></span><span>Averiada: el distintivo indica el tipo de avería (1 ámbar, 2 naranja, 3 rojo)</span></li>
           <li><span class="sim cian anillo-trasvase-camino"><svg class="ico-u" viewBox="-10 -8 20 14"><path d="M-8.5 2.5v-4l3-1 2.2-3.5h7l2.8 3.5 2 1v4z" fill="currentColor" stroke="none"/><circle cx="-4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/><circle cx="4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/></svg></span><span>En camino a recoger paquetes de una averiada (trasvase)</span></li>
           <li><span class="sim cian anillo-trasvase"><svg class="ico-u" viewBox="-10 -8 20 14"><path d="M-8.5 2.5v-4l3-1 2.2-3.5h7l2.8 3.5 2 1v4z" fill="currentColor" stroke="none"/><circle cx="-4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/><circle cx="4.5" cy="3" r="2.2" fill="var(--superficie)" stroke="currentColor" stroke-width="1.5"/></svg></span><span>Recogiendo paquetes de una averiada (trasvase)</span></li>
@@ -148,23 +168,58 @@
           <li><span class="sim"><i class="linea-ruta"></i></span><span>Camino hacia su próxima parada</span></li>
           <li><span class="sim"><i class="parada">1</i><i class="parada naranja">R</i><i class="parada roja">T</i><i class="parada violeta">C</i></span><span>Paradas: entregas en orden, recarga, trasvase, refrigerio</span></li>
           <li><span class="sim naranja"><svg viewBox="0 0 24 24" class="ico-casa"><circle cx="12" cy="12" r="10" fill="var(--fondo)" stroke="currentColor" stroke-width="2.4"/><path d="M12 6.5l6 5.2h-1.6V17H7.6v-5.3H6z" fill="currentColor" stroke="none"/></svg></span><span>Almacén central (abastecimiento permanente)</span></li>
-          <li><span class="sim"><span class="t-VERDE"><svg viewBox="0 0 24 24" class="ico-casa"><circle cx="12" cy="12" r="10" fill="var(--fondo)" stroke="currentColor" stroke-width="2.4"/><path d="M12 6.5l6 5.2h-1.6V17H7.6v-5.3H6z" fill="currentColor" stroke="none"/></svg></span><span class="t-AMBAR"><svg viewBox="0 0 24 24" class="ico-casa"><circle cx="12" cy="12" r="10" fill="var(--fondo)" stroke="currentColor" stroke-width="2.4"/><path d="M12 6.5l6 5.2h-1.6V17H7.6v-5.3H6z" fill="currentColor" stroke="none"/></svg></span><span class="t-ROJO"><svg viewBox="0 0 24 24" class="ico-casa"><circle cx="12" cy="12" r="10" fill="var(--fondo)" stroke="currentColor" stroke-width="2.4"/><path d="M12 6.5l6 5.2h-1.6V17H7.6v-5.3H6z" fill="currentColor" stroke="none"/></svg></span></span><span>Almacén intermedio, color según su stock</span></li>
+          <li><span class="sim"><span class="t-VERDE"><svg viewBox="0 0 24 24" class="ico-casa"><circle cx="12" cy="12" r="10" fill="var(--fondo)" stroke="currentColor" stroke-width="2.4"/><path d="M12 6.5l6 5.2h-1.6V17H7.6v-5.3H6z" fill="currentColor" stroke="none"/></svg></span><span class="t-AMBAR"><svg viewBox="0 0 24 24" class="ico-casa"><circle cx="12" cy="12" r="10" fill="var(--fondo)" stroke="currentColor" stroke-width="2.4"/><path d="M12 6.5l6 5.2h-1.6V17H7.6v-5.3H6z" fill="currentColor" stroke="none"/></svg></span><span class="t-ROJO"><svg viewBox="0 0 24 24" class="ico-casa"><circle cx="12" cy="12" r="10" fill="var(--fondo)" stroke="currentColor" stroke-width="2.4"/><path d="M12 6.5l6 5.2h-1.6V17H7.6v-5.3H6z" fill="currentColor" stroke="none"/></svg></span></span><span>Almacén intermedio, color según su stock (gris: vacío)</span></li>
+          <li><span class="sim"><i class="barra-carga VERDE"></i><i class="barra-carga AMBAR"></i><i class="barra-carga ROJO"></i><i class="barra-carga VACIO"></i></span><span id="leyCarga">Carga de la unidad (barra bajo el ícono)</span></li>
           <li><span class="sim"><i class="p VERDE"></i><i class="p AMBAR"></i><i class="p ROJO"></i></span><span>Pedido, según plazo transcurrido</span></li>
+          <li><span class="sim"><span class="flecha-ley">⟲</span></span><span>El ícono de la unidad gira según la dirección en que avanza</span></li>
           <li><span class="sim"><i class="p ROJO vencido"></i></span><span>Pedido vencido</span></li>
           <li><span class="sim"><i class="linea-bloqueo"></i></span><span>Calle bloqueada</span></li>
         </ul>
       </details>
     </section>
-    <button class="reabrir izq" data-panel="panelIzq" hidden aria-label="Mostrar indicadores">Indicadores</button>
+    <button class="reabrir izq" data-panel="panelIzq" aria-label="Mostrar indicadores">Indicadores</button>
 
     <!-- panel derecho: rastreo de entregas -->
-    <section class="panel der" id="panelDer" aria-label="Rastreo de entregas y averías">
+    <section class="panel der" id="panelDer" aria-label="Pedidos, unidades, almacenes y averías" hidden>
       <button class="plegar" data-panel="panelDer" aria-label="Ocultar rastreo" title="Ocultar panel">
         <svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
       </button>
       <h2 id="tituloDer">Rastreo de entregas</h2>
+      <!-- v0.5: filtros globales del mapa (rúbrica D05, D06 y D07) -->
+      <details class="filtros" id="filtros">
+        <summary><span>Filtros del mapa</span><b id="nFiltros" hidden></b></summary>
+        <div class="fila-filtro" role="group" aria-label="Tipo de unidad">
+          <span>Tipo de unidad</span>
+          <div class="botones-filtro" id="fTipo">
+            <button class="bf activo" data-v="AUTO" aria-pressed="true">Auto</button>
+            <button class="bf activo" data-v="MOTO" aria-pressed="true">Moto</button>
+            <button class="bf activo" data-v="BICI" aria-pressed="true">Bicicleta</button>
+          </div>
+        </div>
+        <div class="fila-filtro" role="group" aria-label="Carga de las unidades">
+          <span>Carga de las unidades</span>
+          <div class="botones-filtro" id="fCarga">
+            <button class="bf activo" data-v="VERDE" aria-pressed="true" title="Bien cargada"><i class="p VERDE"></i>Alta</button>
+            <button class="bf activo" data-v="AMBAR" aria-pressed="true" title="Poca carga"><i class="p AMBAR"></i>Media</button>
+            <button class="bf activo" data-v="ROJO" aria-pressed="true" title="Casi sin carga"><i class="p ROJO"></i>Baja</button>
+            <button class="bf activo" data-v="VACIO" aria-pressed="true" title="Sin carga"><i class="p VACIO"></i>Vacía</button>
+          </div>
+        </div>
+        <div class="fila-filtro" role="group" aria-label="Stock de los almacenes intermedios">
+          <span>Stock de almacenes intermedios</span>
+          <div class="botones-filtro" id="fAlmacen">
+            <button class="bf activo" data-v="VERDE" aria-pressed="true" title="Bastante stock"><i class="p VERDE"></i>Alto</button>
+            <button class="bf activo" data-v="AMBAR" aria-pressed="true" title="Poco stock"><i class="p AMBAR"></i>Medio</button>
+            <button class="bf activo" data-v="ROJO" aria-pressed="true" title="Muy poco stock"><i class="p ROJO"></i>Bajo</button>
+            <button class="bf activo" data-v="VACIO" aria-pressed="true" title="Sin stock"><i class="p VACIO"></i>Vacío</button>
+          </div>
+        </div>
+        <button class="limpiar-filtros" id="limpiarFiltros" type="button">Mostrar todo</button>
+      </details>
       <div class="pestanas" role="tablist" aria-label="Listas del panel">
         <button class="pestana activa" role="tab" id="tabPedidos" aria-selected="true" aria-controls="vistaPedidos">Pedidos <b id="nPedidos">0</b></button>
+        <button class="pestana" role="tab" id="tabUnidades" aria-selected="false" aria-controls="vistaUnidades">Unidades <b id="nUnidades">0</b></button>
+        <button class="pestana" role="tab" id="tabAlmacenes" aria-selected="false" aria-controls="vistaAlmacenes">Almacenes</button>
         <button class="pestana" role="tab" id="tabAverias" aria-selected="false" aria-controls="vistaAverias">Averías <b id="nAverias">0</b></button>
       </div>
       <div class="buscador">
@@ -173,9 +228,41 @@
         <button class="limpiar" id="limpiarBuscar" hidden aria-label="Quitar el filtro" title="Quitar el filtro">×</button>
       </div>
       <div class="vista" id="vistaPedidos" role="tabpanel" aria-labelledby="tabPedidos">
-        <div class="leyenda-mini leyenda-pedidos"><span class="nota">Plazo transcurrido</span><span><i class="p VERDE"></i>&lt;50%</span><span><i class="p AMBAR"></i>50–80%</span><span><i class="p ROJO"></i>&gt;80% o vencido</span></div>
+        <div class="leyenda-mini leyenda-pedidos" id="leyendaPedidos"><span class="nota">Plazo transcurrido</span><span><i class="p VERDE"></i>&lt;50%</span><span><i class="p AMBAR"></i>50–80%</span><span><i class="p ROJO"></i>&gt;80% o vencido</span></div>
         <div class="cabecera-lista"><span id="etiquetaLista">En curso</span><b id="cuentaPedidos">0 pedidos</b></div>
         <ul class="pedidos" id="listaPedidos"></ul>
+      </div>
+      <!-- v0.5: lista de unidades de transporte (rúbrica E02 a E07, E13 a E15 y F01) -->
+      <div class="vista" id="vistaUnidades" role="tabpanel" aria-labelledby="tabUnidades" hidden>
+        <div class="controles-lista">
+          <label class="campo-mini"><span>Ordenar por</span>
+            <select id="ordenUnidades" aria-label="Ordenar unidades">
+              <option value="codigo">Código</option>
+              <option value="ocupacion-desc">Ocupación (mayor a menor)</option>
+              <option value="ocupacion-asc">Ocupación (menor a mayor)</option>
+              <option value="salida-asc">Hora de salida (más antigua primero)</option>
+              <option value="salida-desc">Hora de salida (más reciente primero)</option>
+              <option value="llegada-asc">Hora de llegada a su destino (más próxima primero)</option>
+              <option value="llegada-desc">Hora de llegada a su destino (más lejana primero)</option>
+            </select>
+          </label>
+          <div class="busqueda-min" role="group" aria-label="Buscar unidades por minutos">
+            <select id="minCriterio" aria-label="Criterio de minutos">
+              <option value="destino-llegada">Llega a su destino en</option>
+              <option value="destino-salida">Sale de su destino en</option>
+              <option value="origen-salida">Salió de su almacén hace</option>
+              <option value="origen-llegada">Llega a un almacén en</option>
+            </select>
+            <span>≤</span><input id="minValor" type="number" min="0" step="5" placeholder="min" aria-label="Minutos como máximo"><span>min</span>
+          </div>
+        </div>
+        <div class="leyenda-mini" id="leyendaCargaLista"></div>
+        <div class="cabecera-lista"><span id="etiquetaUnidades">Unidades</span><b id="cuentaUnidades">0 unidades</b></div>
+        <ul class="pedidos unidades" id="listaUnidades"></ul>
+      </div>
+      <!-- v0.5: lista de almacenes con sus envíos (rúbrica E18 a E22 y F05) -->
+      <div class="vista" id="vistaAlmacenes" role="tabpanel" aria-labelledby="tabAlmacenes" hidden>
+        <ul class="pedidos lista-almacenes" id="listaAlmacenesDer"></ul>
       </div>
       <!-- v03: unidades averiadas por tipo e historial de averías del escenario -->
       <div class="vista" id="vistaAverias" role="tabpanel" aria-labelledby="tabAverias" hidden>
@@ -186,7 +273,7 @@
         <ul class="averias" id="listaAverias"></ul>
       </div>
     </section>
-    <button class="reabrir der" data-panel="panelDer" hidden aria-label="Mostrar rastreo">Rastreo</button>
+    <button class="reabrir der" data-panel="panelDer" aria-label="Mostrar el panel de seguimiento">Seguimiento</button>
 
     <!-- detalle del elemento seleccionado -->
     <section class="detalle" id="detalle" hidden aria-live="polite">
@@ -205,6 +292,25 @@
       </button>
     </div>
 
+    <!-- v0.5: pantalla Configuración: se abre desde el menú izquierdo sobre el mapa, que sigue corriendo detrás -->
+    <section class="config" id="vistaConfig" hidden aria-label="Configuración">
+      <header class="config-cab">
+        <div>
+          <h2>Configuración</h2>
+          <p class="nota">Los cambios se guardan en <code id="cfgArchivo">config.properties</code> y afectan a todos los navegadores conectados. Cada campo indica cuándo se aplica.</p>
+          <div class="config-leyenda"><span><i class="badge AHORA">Ahora</i>en la simulación en curso</span><span><i class="badge CICLO">Siguiente ciclo</i>en el siguiente ciclo de planificación</span><span><i class="badge INICIO">Al iniciar</i>al iniciar la próxima simulación</span></div>
+        </div>
+        <div class="config-acciones">
+          <button class="btn" id="cfgRestaurar" type="button">Restaurar valores por defecto</button>
+          <button class="btn" id="cfgDescartar" type="button" disabled>Descartar cambios</button>
+          <button class="btn primario" id="cfgGuardar" type="button" disabled>Guardar</button>
+          <button class="btn" id="cfgCerrar" type="button">Volver al simulador</button>
+        </div>
+      </header>
+      <p class="aviso-cfg" id="cfgAviso" hidden></p>
+      <div class="config-secciones" id="cfgSecciones"><p class="nota">Cargando…</p></div>
+    </section>
+
     <div class="avisos" id="avisos" aria-live="polite"></div>
   </main>
 </div>
@@ -215,6 +321,8 @@
   <p id="finPeriodo" class="nota"></p>
   <div id="finColapso" hidden></div>
   <div class="fin-grid" id="finGrid"></div>
+  <!-- v0.5: reporte de la última planificación estable (rúbrica G08 y G10) -->
+  <section class="fin-plan" id="finPlan" hidden></section>
   <div class="modal-acciones">
     <button class="btn" id="finCerrar">Ver el mapa</button>
     <button class="btn primario" id="finNueva">Nueva simulación</button>
@@ -243,6 +351,16 @@
   <div class="modal-acciones">
     <button class="btn" id="avCancelar">Cancelar</button>
     <button class="btn peligro" id="avConfirmar">Registrar avería</button>
+  </div>
+</dialog>
+
+<!-- v0.5: confirmación al guardar o restaurar la configuración -->
+<dialog class="modal" id="modalCfg" aria-labelledby="cfgConfTitulo">
+  <h2 id="cfgConfTitulo">¿Guardar la configuración?</h2>
+  <div id="cfgResumen" class="cfg-resumen"></div>
+  <div class="modal-acciones">
+    <button class="btn" id="cfgNo">Cancelar</button>
+    <button class="btn primario" id="cfgSi">Guardar</button>
   </div>
 </dialog>
 
