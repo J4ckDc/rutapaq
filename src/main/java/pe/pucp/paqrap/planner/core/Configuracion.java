@@ -30,6 +30,7 @@ public final class Configuracion {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+        pe.pucp.paqrap.planner.model.TipoVehiculo.configurar(c);   // v0.5: flota.* (fuente unica de la flota)
         return c;
     }
 
@@ -40,6 +41,7 @@ public final class Configuracion {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+        pe.pucp.paqrap.planner.model.TipoVehiculo.configurar(c);
         return c;
     }
 

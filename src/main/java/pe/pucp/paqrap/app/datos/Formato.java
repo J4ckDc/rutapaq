@@ -1,8 +1,6 @@
 package pe.pucp.paqrap.app.datos;
 
 import pe.pucp.paqrap.app.modelo.Nodo;
-import pe.pucp.paqrap.planner.core.MapaReticula;
-import pe.pucp.paqrap.planner.ien.LectorBloqueos;
 
 import java.time.LocalDateTime;
 import java.time.YearMonth;
@@ -31,7 +29,6 @@ public final class Formato {
             Pattern.compile("^\\s*" + INSTANTE + ":([^,]+),([^,]+),([^,]+),(\\d+),(\\d+)\\s*$");
     private static final Pattern BLOQUEO =
             Pattern.compile("^\\s*" + INSTANTE + "-" + INSTANTE + ":(.+)$");
-    private static final MapaReticula INDICES = new MapaReticula(70, 50);
 
     private Formato() {
     }
@@ -68,9 +65,28 @@ public final class Formato {
         for (int i = 0; i < c.length; i++) puntos[i] = Integer.parseInt(c[i].trim());
         List<Nodo> vertices = new ArrayList<>();
         for (int i = 0; i + 1 < puntos.length; i += 2) vertices.add(new Nodo(puntos[i], puntos[i + 1]));
-        List<Nodo> nodos = new ArrayList<>();
-        for (int n : LectorBloqueos.nodosDePoligonal(puntos, INDICES)) nodos.add(new Nodo(INDICES.x(n), INDICES.y(n)));
         return new Bloqueo(instante(m, x.group(1), x.group(2), x.group(3)),
-                instante(m, x.group(4), x.group(5), x.group(6)), vertices, nodos);
+                instante(m, x.group(4), x.group(5), x.group(6)), vertices, nodosDePoligonal(puntos));
+    }
+
+    /**
+     * Todos los nodos de la poligonal abierta (tramos horizontales o verticales), extremos incluidos y sin repetir.
+     * v0.5 (B01): ya no depende de una retícula fija de 70 x 50: el tamaño del mapa es configurable y la simulación
+     * descarta los nodos que queden fuera de su mapa.
+     */
+    static List<Nodo> nodosDePoligonal(int[] puntos) {
+        java.util.Set<Nodo> nodos = new java.util.LinkedHashSet<>();
+        for (int i = 0; i + 3 < puntos.length; i += 2) {
+            int x1 = puntos[i], y1 = puntos[i + 1], x2 = puntos[i + 2], y2 = puntos[i + 3];
+            if (x1 < 0 || y1 < 0 || x2 < 0 || y2 < 0) throw new IllegalArgumentException("Coordenada negativa");
+            if (x1 == x2) {
+                for (int y = Math.min(y1, y2); y <= Math.max(y1, y2); y++) nodos.add(new Nodo(x1, y));
+            } else if (y1 == y2) {
+                for (int x = Math.min(x1, x2); x <= Math.max(x1, x2); x++) nodos.add(new Nodo(x, y1));
+            } else {
+                throw new IllegalArgumentException("Tramo no horizontal ni vertical: (" + x1 + "," + y1 + ")-(" + x2 + "," + y2 + ")");
+            }
+        }
+        return new ArrayList<>(nodos);
     }
 }

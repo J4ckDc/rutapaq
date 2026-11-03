@@ -28,7 +28,6 @@ import pe.pucp.paqrap.planner.model.Vehiculo;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -79,6 +78,14 @@ import java.util.Set;
  *     estado de la flota en ese instante; el estado publicado indica además cómo terminó (tipoFin).
  *   - Si se acaban los datos de ventas y ya se entregó todo, termina "sin colapso" (SIN_COLAPSO).
  *   - v0.4.1: las averías tampoco se leen de archivo en el colapso; se registran solo desde el visualizador.
+ *
+ * Cambios v0.5:
+ *   - Capacidad, velocidad y costo de cada tipo vienen de una sola fuente configurable (TipoVehiculo, claves flota.*).
+ *   - Duración del mantenimiento por tipo (mantenimiento.horas.*) y recarga configurable (recarga.soloLoNecesario).
+ *   - El estado publicado trae semáforo + vacío, indicadores globales, horarios estimados por parada, origen y salida
+ *     de cada unidad, envíos con identificadores de producto y, por almacén, lo que está en tránsito, lo que sale en
+ *     las próximas horas y lo entregado en las últimas (panel.ventanaHoras).
+ *   - Se guarda la última planificación estable (guardarPlan) para el reporte al terminar el escenario.
  */
 public final class Simulacion implements Runnable {
 
@@ -113,12 +120,19 @@ public final class Simulacion implements Runnable {
     private final FuenteDatos fuente;
     private final PlanMantenimiento mantenimiento;
     private final Indicadores semaforo;
-    private final ReglasAveria reglas;
+    private ReglasAveria reglas;          // v0.5: se recarga si cambian sus parámetros en la pantalla Configuración
+    /** v0.5: velocidades cambiadas desde la pantalla Configuración: se aplican en el siguiente ciclo (P&R 16). */
+    private Map<pe.pucp.paqrap.planner.model.TipoVehiculo, Double> velocidadesPendientes;
     private final List<Averia> averias = new ArrayList<>();   // v03: historial del escenario (vigentes y finalizadas)
 
     private final double factor;          // segundos simulados por segundo real
     private final double cicloSeg;        // Sc
-    private final double saMs;            // Sa: tiempo máximo de cómputo (criterio C de colapso)
+    /**
+     * Sa: tiempo real entre dos ejecuciones del planificador. v0.5: es Sc / K (K = factor, segundos simulados por
+     * segundo real): 15 s en los 5 días (K = 240) y 6 s en el colapso (K = 600). Criterio C del colapso: Ta >= Sa.
+     * Antes se usaba ien.saSegundos (30 s), que es un parámetro del banco del IEN y no el Sa real del simulador.
+     */
+    private final double saMs;
     private final double margenSeg;       // holgura opcional frente al límite de cada pedido
     private final int maximoPorEntrega;   // entregas parciales
     private final double duracionSeg;     // 5D: 120 h
@@ -145,6 +159,50 @@ public final class Simulacion implements Runnable {
     private double costo, kmTotal;
     private String ultimoError = "";
 
+    /**
+     * v0.5: false (por defecto) = en cada recarga la unidad se llena hasta su capacidad, como en la v0.4.1;
+     * true = carga solo lo que entregará hasta su siguiente recarga. Decisión del equipo (31/10/2026): llenar, porque
+     * en las pruebas comparativas cargar solo lo necesario costó entre 2 % y 9 % más y, con demanda alta, dio más
+     * pedidos vencidos; queda como parámetro por si el curso indica lo contrario (P&R pregunta 20).
+     */
+    private final boolean soloLoNecesario;
+
+    // ---- v0.5: planificador en segundo plano (modo servidor). Mientras el ALNS planifica, la simulación sigue
+    //      avanzando y publicando el estado; el plan se aplica cuando termina. Las pruebas y el modo "probar" usan
+    //      el modo síncrono (avanzar), que planifica en el mismo instante simulado como antes.
+    private boolean asincrono;
+    private java.util.concurrent.ExecutorService hiloPlan;
+    private java.util.concurrent.CompletableFuture<ResultadoPlan> planEnCurso;
+    private Preparacion prepEnCurso;
+    private final double presupuestoSeg;      // P: tope de tiempo de cómputo del planificador
+
+    /** Lo que se arma con el estado vigente para una ejecución del planificador. */
+    private record Preparacion(InstanciaPlanificacion instancia, Map<String, String> original, int[] lotes,
+                               Map<Unidad, List<Parada>> liberadas, Set<String> conAveria, double t0) {
+    }
+
+    /** Resultado de una ejecución del planificador: el plan o el error, y cuánto tardó (Ta, en ms). */
+    private record ResultadoPlan(PlanDistribucion plan, RuntimeException error, long ms) {
+    }
+
+    /** v0.5: entrega hecha (para el panel de almacenes: entregados en las últimas panel.ventanaHoras). */
+    private record EntregaHecha(String pedidoId, String cliente, Nodo destino, String unidad, int cantidad,
+                                int p0, int p1, String almacen, double hora) {
+    }
+
+    private final java.util.ArrayDeque<EntregaHecha> entregasRecientes = new java.util.ArrayDeque<>();
+    /** v0.5: ventana de los paneles de almacenes (por salir en las próximas / entregados en las últimas N horas). */
+    private final double ventanaSeg;
+
+    /** v0.5: una fila del reporte de la última planificación estable (rúbrica G08 a G10). */
+    public record FilaPlan(String unidad, String tipoUnidad, int orden, String tipo, String referencia, String cliente,
+                           int x, int y, int cantidad, String productos, LocalDateTime llegada, LocalDateTime salida) {
+    }
+
+    private List<FilaPlan> ultimoPlan;          // null si aún no hay plan
+    private LocalDateTime ultimoPlanHora;
+    private int ultimoPlanCiclo, ultimoPlanSinAsignar;
+
     public Simulacion(Config cfg, Escenario escenario, LocalDateTime inicio, Planificador planificador) {
         this.cfg = cfg;
         this.escenario = escenario;
@@ -154,26 +212,44 @@ public final class Simulacion implements Runnable {
         this.reglas = new ReglasAveria(cfg);
         this.fuente = new FuenteDatos(Path.of(cfg.texto("datos.carpeta", "datos")), inicio);
         this.finDatos = FuenteDatos.finDeVentas(Path.of(cfg.texto("datos.carpeta", "datos")));
-        this.mantenimiento = new PlanMantenimiento(Path.of(cfg.texto("datos.carpeta", "datos")));
+        this.mantenimiento = new PlanMantenimiento(Path.of(cfg.texto("datos.carpeta", "datos")), horasMantenimiento(cfg));
         this.mapa = new MapaReticula(cfg.entero("ien.mapaAnchoKm", 70), cfg.entero("ien.mapaAltoKm", 50));
         this.caminos = new Caminos(mapa);
 
         this.cicloSeg = cfg.decimal("ien.scMinutos", 60) * 60;
-        this.saMs = cfg.decimal("ien.saSegundos", 30) * 1000;
+        this.presupuestoSeg = cfg.planificador().presupuestoSegundos();
         this.margenSeg = cfg.decimal("planificador.margenMinutos", 0) * 60;
-        this.maximoPorEntrega = cfg.entero("ien.maximoProductosPorEntrega", 24);
+        // v0.5: una entrega parcial no puede ser mayor que la unidad más grande de la flota configurada
+        int mayorCapacidad = 0;
+        for (TipoUnidad tu : TipoUnidad.values()) {
+            if (cfg.entero(tu == TipoUnidad.AUTO ? "ien.autos" : tu == TipoUnidad.MOTO ? "ien.motos" : "ien.bicicletas", 1) > 0) {
+                mayorCapacidad = Math.max(mayorCapacidad, tu.capacidad());
+            }
+        }
+        this.maximoPorEntrega = Math.max(1, Math.min(cfg.entero("ien.maximoProductosPorEntrega", 24),
+                mayorCapacidad > 0 ? mayorCapacidad : Integer.MAX_VALUE));
         this.duracionSeg = escenario == Escenario.SEMANAL ? 5 * 24 * 3600 : Double.POSITIVE_INFINITY;
         this.horizonteRutaSeg = cfg.decimal("planificador.horizonteRutaHoras", 8) * 3600;
+        this.soloLoNecesario = Boolean.parseBoolean(cfg.texto("recarga.soloLoNecesario", "false"));
+        this.ventanaSeg = cfg.decimal("panel.ventanaHoras", 4) * 3600;
         this.factor = switch (escenario) {
             case SEMANAL -> duracionSeg / (cfg.decimal("escenario.semanal.minutosReales", 30) * 60);
             case COLAPSO -> cfg.decimal("escenario.colapso.factor", 600);
             case DIA_A_DIA -> 1.0;
         };
+        this.saMs = cicloSeg / factor * 1000;   // v0.5: Sa real = Sc / K
 
         int capInt = cfg.entero("ien.capacidadIntermedio", 1000);
         almacenes.add(new Almacen("ALM-CENTRAL", nodo(cfg.texto("ien.almacenCentral", "27,14")), -1));
         almacenes.add(new Almacen("ALM-NOROESTE", nodo(cfg.texto("ien.almacenNorOeste", "12,38")), capInt));
         almacenes.add(new Almacen("ALM-ESTE", nodo(cfg.texto("ien.almacenEste", "57,27")), capInt));
+        // v0.5 (B01): el tamaño del mapa es configurable; los almacenes deben quedar dentro de él
+        for (Almacen a : almacenes) {
+            if (!mapa.dentro(a.nodo.x(), a.nodo.y())) {
+                throw new IllegalArgumentException("El almacén " + a.id + " (" + a.nodo.x() + "," + a.nodo.y()
+                        + ") está fuera del mapa de " + anchoMapa() + " x " + altoMapa() + " km");
+            }
+        }
 
         Nodo central = almacenes.get(0).nodo;
         agregarFlota(TipoUnidad.AUTO, cfg.entero("ien.autos", 10), central);
@@ -183,6 +259,15 @@ public final class Simulacion implements Runnable {
 
         this.proximaRecarga = inicio.toLocalDate().atTime(23, 59, 59);
         if (!proximaRecarga.isAfter(inicio)) proximaRecarga = proximaRecarga.plusDays(1);
+    }
+
+    /** v0.5: duración del mantenimiento preventivo por tipo de unidad (mantenimiento.horas.auto, .moto, .bici). */
+    static Map<TipoUnidad, Double> horasMantenimiento(Config cfg) {
+        Map<TipoUnidad, Double> h = new java.util.EnumMap<>(TipoUnidad.class);
+        for (TipoUnidad t : TipoUnidad.values()) {
+            h.put(t, cfg.decimal("mantenimiento.horas." + t.name().toLowerCase(java.util.Locale.ROOT), 24));
+        }
+        return h;
     }
 
     private void agregarFlota(TipoUnidad tipo, int n, Nodo central) {
@@ -234,19 +319,32 @@ public final class Simulacion implements Runnable {
     @Override
     public void run() {
         estado = Estado.EJECUTANDO;
+        // v0.5: en el servidor el planificador corre en su propio hilo (error 1 de la revisión: antes la simulación
+        // y todos los navegadores se detenían hasta 2 s en cada ciclo y luego las unidades saltaban)
+        synchronized (this) {
+            asincrono = true;
+            hiloPlan = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread h = new Thread(r, "planificador");
+                h.setDaemon(true);
+                return h;
+            });
+        }
         long ultimo = System.nanoTime();
         try {
             while (!cancelada && estado != Estado.TERMINADA) {
                 Thread.sleep(TICK_MS);
                 long ahoraNs = System.nanoTime();
-                // v03: se simula el tiempo real que pasó de verdad desde la vuelta anterior (incluye lo que tardó
-                // el planificador), no 100 ms fijos. Antes la simulación se atrasaba respecto del reloj real.
+                // v03: se simula el tiempo real que pasó de verdad desde la vuelta anterior, no 100 ms fijos.
                 long transcurrido = Math.min(ahoraNs - ultimo, MAX_VUELTA_NS);
                 ultimo = ahoraNs;
                 synchronized (this) {
+                    revisarPlanEnCurso();                 // v0.5: aplica el plan si el planificador ya terminó
                     if (estado == Estado.EJECUTANDO) {      // en pausa el reloj simulado no avanza
                         nsReales += transcurrido;
                         avanzar(factor * transcurrido / 1e9);
+                    } else if (estado == Estado.PAUSADA && planEnCurso == null && t >= proximoCiclo) {
+                        lanzarPlan(0);                    // v0.5: replanificación pedida en pausa (avería)
+                        proximoCiclo = t + cicloSeg;
                     }
                 }
             }
@@ -260,6 +358,7 @@ public final class Simulacion implements Runnable {
         } finally {
             synchronized (this) {
                 if (estado != Estado.TERMINADA) terminar("Reemplazada por una nueva simulación", "REEMPLAZADA");
+                if (hiloPlan != null) hiloPlan.shutdownNow();
             }
             try {
                 fuente.close();
@@ -368,7 +467,8 @@ public final class Simulacion implements Runnable {
         cambio |= bloqueosActivos.removeIf(b -> !b.fin().isAfter(ahora));
         if (cambio) {
             mapa.limpiarBloqueos();
-            for (Bloqueo b : bloqueosActivos) for (Nodo n : b.nodos()) mapa.bloquear(caminos.indice(n));
+            // v0.5 (B01): si el mapa configurado es más chico que los datos, se ignoran los nodos que quedan fuera
+            for (Bloqueo b : bloqueosActivos) for (Nodo n : b.nodos()) if (mapa.dentro(n.x(), n.y())) mapa.bloquear(caminos.indice(n));
         }
 
         // 3. recarga diaria de los almacenes intermedios (23:59:59)
@@ -377,10 +477,10 @@ public final class Simulacion implements Runnable {
             proximaRecarga = proximaRecarga.plusDays(1);
         }
 
-        // 3b. mantenimiento preventivo (v02): entra a las 00:00 del día indicado y sale al terminar el día
-        LocalDate hoy = ahora.toLocalDate();
+        // 3b. mantenimiento preventivo (v02): entra a las 00:00 del día indicado; v0.5: sale al cumplir la duración
+        //     de su tipo (mantenimiento.horas.*, 24 h por defecto)
         for (Unidad u : unidades) {
-            boolean toca = mantenimiento.enMantenimiento(u.id, hoy);
+            boolean toca = mantenimiento.enMantenimiento(u.id, ahora);
             if (toca && !u.enMantenimiento) entrarMantenimiento(u);
             else if (!toca && u.enMantenimiento) u.enMantenimiento = false;   // vuelve disponible en el central
         }
@@ -389,10 +489,22 @@ public final class Simulacion implements Runnable {
         revisarAverias();
 
         // 4. ciclo de planificación (también el extraordinario que pide una avería)
+        if (asincrono) revisarPlanEnCurso();     // v0.5: si el planificador terminó, se aplica su plan
         if (t >= proximoCiclo) {
-            planificar();
-            proximoCiclo = t + cicloSeg;
-            if (estado != Estado.EJECUTANDO) return;
+            if (!asincrono) {
+                planificar();
+                proximoCiclo = t + cicloSeg;
+                if (estado != Estado.EJECUTANDO) return;
+            } else if (planEnCurso == null) {
+                lanzarPlan(adelanto());
+                proximoCiclo = t + cicloSeg;
+            } else if (escenario == Escenario.COLAPSO) {
+                // v0.5, criterio C: toca la siguiente ejecución y la anterior aún no termina (Ta >= Sa)
+                colapso("C", String.format("el planificador aún no terminaba cuando tocaba la siguiente ejecución "
+                        + "(Ta >= Sa = %.1f s)", saMs / 1000), null);
+                return;
+            }
+            // en los 5 días se espera: el siguiente ciclo se lanza apenas termine el que está en curso
         }
 
         // 5. movimiento de las unidades
@@ -412,6 +524,7 @@ public final class Simulacion implements Runnable {
             }
         }
         pedidos.values().removeIf(p -> p.completo() && p.asignado <= 0 && t > p.liberado);
+        while (!entregasRecientes.isEmpty() && entregasRecientes.peekFirst().hora() < t - ventanaSeg) entregasRecientes.pollFirst();
 
         // 7. fin de la simulación de 5 días
         if (t >= duracionSeg) terminar("Fin de la simulación de 5 días", "FIN_PERIODO");
@@ -446,6 +559,8 @@ public final class Simulacion implements Runnable {
         u.progreso = 0;
         u.carga = 0;
         u.nodo = almacenes.get(0).nodo;
+        u.origenId = almacenes.get(0).id;     // v0.5
+        u.salidaOrigen = -1;
         u.ocupadoHasta = t;
         u.ocupacion = "";
         u.enMantenimiento = true;
@@ -456,6 +571,15 @@ public final class Simulacion implements Runnable {
         String id = "P" + (++contador);
         pedidos.put(id, new Pedido(id, cliente, nodo, cantidad, plazoHoras, registro));
         recibidos++;
+    }
+
+    /** v0.5 (B01): tamaño del mapa de esta simulación, en km (ien.mapaAnchoKm x ien.mapaAltoKm al iniciarla). */
+    public int anchoMapa() {
+        return mapa.getAncho() - 1;
+    }
+
+    public int altoMapa() {
+        return mapa.getAlto() - 1;
     }
 
     /** Registro en línea (operación día a día). Se planifica en el siguiente paso. */
@@ -488,8 +612,8 @@ public final class Simulacion implements Runnable {
         String motivo = motivoNoAveriable(u);
         if (motivo != null) throw new IllegalStateException(motivo);
         Averia av = averiar(u, tipo, t, Averia.VISUALIZADOR);
-        if (estado == Estado.PAUSADA) {               // en pausa el reloj no avanza: se replanifica ya
-            planificar();
+        if (estado == Estado.PAUSADA && !asincrono) {   // en pausa el reloj no avanza: se replanifica ya
+            planificar();                                    // (v0.5: en el servidor lo lanza el hilo de la simulación)
             proximoCiclo = t + cicloSeg;
         }
         return av;
@@ -553,6 +677,8 @@ public final class Simulacion implements Runnable {
         devueltos += u.carga;
         u.carga = 0;
         u.nodo = almacenes.get(0).nodo;
+        u.origenId = almacenes.get(0).id;     // v0.5
+        u.salidaOrigen = -1;
         u.camino.clear();
         u.progreso = 0;
         u.ocupacion = "";
@@ -626,15 +752,83 @@ public final class Simulacion implements Runnable {
 
     // ------------------------------------------------------------------ planificación (rutapaq-planner)
 
+    /**
+     * Ciclo de planificación síncrono (pruebas y modo "probar"): prepara, ejecuta el planificador y aplica el plan en
+     * el mismo instante simulado, como en las versiones anteriores.
+     */
     private void planificar() {
-        ciclos++;
+        Preparacion prep = preparar(0);
+        if (prep == null) return;
+        ResultadoPlan r = ejecutar(prep);
+        aplicar(prep, r);
+    }
 
-        // v02: copia de los itinerarios por si el planificador falla (se restauran en el paso e)
-        Map<Unidad, List<Parada>> antes = new HashMap<>();
-        for (Unidad u : unidades) antes.put(u, new ArrayList<>(u.paradas));
+    /** v0.5: ejecución del planificador (Ta). En el servidor corre en el hilo "planificador", sin el candado. */
+    private ResultadoPlan ejecutar(Preparacion prep) {
+        long ini = System.nanoTime();
+        try {
+            PlanDistribucion plan = planificador.planificar(prep.instancia());
+            return new ResultadoPlan(plan, null, (System.nanoTime() - ini) / 1_000_000);
+        } catch (RuntimeException e) {
+            return new ResultadoPlan(null, e, (System.nanoTime() - ini) / 1_000_000);
+        }
+    }
+
+    /**
+     * v0.5: cuánto tiempo simulado pasará mientras el planificador trabaja (Ta estimado × K). El plan se calcula para
+     * ese instante: una unidad que queda libre antes no puede empezar su nueva ruta hasta que el plan llegue.
+     */
+    private double adelanto() {
+        double taSeg = msUltimoPlan > 0 ? Math.min(msUltimoPlan / 1000.0 * 1.2 + 0.1, presupuestoSeg * 1.5) : presupuestoSeg;
+        return Math.min(cicloSeg / 2, factor * taSeg);
+    }
+
+    /** v0.5, modo servidor: prepara con el candado y lanza el planificador en su hilo; la simulación sigue. */
+    private void lanzarPlan(double adelanto) {
+        Preparacion prep = preparar(adelanto);
+        if (prep == null) return;
+        prepEnCurso = prep;
+        planEnCurso = java.util.concurrent.CompletableFuture.supplyAsync(() -> ejecutar(prep), hiloPlan);
+    }
+
+    /** v0.5: si el plan en curso ya terminó, se aplica (se llama con el candado tomado). */
+    private void revisarPlanEnCurso() {
+        if (planEnCurso == null || !planEnCurso.isDone()) return;
+        ResultadoPlan r;
+        try {
+            r = planEnCurso.join();
+        } catch (RuntimeException e) {
+            r = new ResultadoPlan(null, e, 0);
+        }
+        Preparacion prep = prepEnCurso;
+        planEnCurso = null;
+        prepEnCurso = null;
+        aplicar(prep, r);
+    }
+
+    /**
+     * Arma la instancia del planificador con el estado vigente (pasos a a d del ciclo). Devuelve null si no hay nada
+     * que planificar. t0 = t + adelanto: el instante para el que se planifica (v0.5; 0 en el modo síncrono).
+     */
+    private Preparacion preparar(double adelanto) {
+        ciclos++;
+        double t0 = t + adelanto;
+
+        // v0.5: velocidades cambiadas desde la pantalla Configuración: rigen desde este ciclo (P&R 15 y 16)
+        if (velocidadesPendientes != null) {
+            velocidadesPendientes.forEach(pe.pucp.paqrap.planner.model.TipoVehiculo::setVelocidadKmH);
+            System.out.printf("[%s] Nuevas velocidades desde este ciclo: %s%n", instante(t).withNano(0), velocidadesPendientes);
+            velocidadesPendientes = null;
+        }
 
         // a) cada unidad conserva solo la parada hacia la que ya se mueve; el resto se replanifica
-        for (Unidad u : unidades) recortar(u);
+        //    v0.5: se guardan las paradas liberadas para devolverlas si el planificador falla
+        Map<Unidad, List<Parada>> liberadas = new HashMap<>();
+        Set<String> conAveria = new java.util.HashSet<>();
+        for (Unidad u : unidades) {
+            liberadas.put(u, recortar(u));
+            if (u.averia != null) conAveria.add(u.id);
+        }
 
         // b) estado de la flota tal como lo espera el planificador
         //    v02: no reciben rutas las unidades en mantenimiento ni las que entran a mantenimiento antes
@@ -642,9 +836,9 @@ public final class Simulacion implements Runnable {
         //    v03: tampoco las averiadas tipo 2 y 3; la de tipo 1 sí, disponible al terminar sus 2 h y con su carga.
         Map<String, Integer> reservado = new HashMap<>();
         List<Vehiculo> flota = new ArrayList<>();
-        LocalDateTime finHorizonte = instante(t + horizonteRutaSeg);
+        LocalDateTime finHorizonte = instante(t0 + horizonteRutaSeg);
         for (Unidad u : unidades) {
-            Vehiculo v = vehiculo(u, reservado);   // siempre: reserva el stock de sus recargas conservadas
+            Vehiculo v = vehiculo(u, reservado, t0);   // siempre: reserva el stock de sus recargas conservadas
             boolean disponible = !u.enMantenimiento && !mantenimiento.empiezaEntre(u.id, instante(t), finHorizonte)
                     && (u.averia == null || !u.averia.seTraslada());
             if (disponible) flota.add(v);
@@ -667,7 +861,7 @@ public final class Simulacion implements Runnable {
                 if (av == null || !av.seTraslada() || av.fase != Averia.Fase.EN_LUGAR || esAlmacen(av.nodo)) continue;
                 String id = TRASVASE + u.id;
                 int saldo = u.carga - reservado.getOrDefault(id, 0);
-                if (saldo <= 0 || t + reglas.segundosTrasvase() > av.finEnLugar) continue;
+                if (saldo <= 0 || t0 + reglas.segundosTrasvase() > av.finEnLugar) continue;
                 pe.pucp.paqrap.planner.model.Almacen x = new pe.pucp.paqrap.planner.model.Almacen(id,
                         TipoAlmacen.TRASVASE, caminos.indice(av.nodo), av.nodo.x(), av.nodo.y(), saldo);
                 x.setDisponibleHasta(instante(av.finEnLugar));
@@ -684,51 +878,60 @@ public final class Simulacion implements Runnable {
         int[] lotes = tamanosDeLote();
         for (Pedido p : pedidos.values()) {
             if (p.porAsignar() <= 0) continue;
-            for (pe.pucp.paqrap.planner.model.Pedido parte : LectorVentas.fraccionar(pedidoParaPlanificar(p),
+            for (pe.pucp.paqrap.planner.model.Pedido parte : LectorVentas.fraccionar(pedidoParaPlanificar(p, t0),
                     lotes[Math.min(p.particion, lotes.length - 1)])) {
                 cartera.add(parte);
                 original.put(parte.getId(), p.id);
             }
         }
-        if (cartera.isEmpty()) return;
+        if (cartera.isEmpty()) return null;
 
-        // e) ejecución del planificador (Ta)
-        PlanDistribucion plan;
-        long ini = System.nanoTime();
-        try {
-            plan = planificador.planificar(new InstanciaPlanificacion(mapa, alm, flota, cartera, instante(t),
-                    cfg.planificador()));
-        } catch (RuntimeException e) {
+        // v0.5: en el servidor el planificador recibe una copia del mapa: los bloqueos pueden cambiar mientras trabaja
+        MapaReticula m = asincrono ? mapa.copia() : mapa;
+        return new Preparacion(new InstanciaPlanificacion(m, alm, flota, cartera, instante(t0), cfg.planificador()),
+                original, lotes, liberadas, conAveria, t0);
+    }
+
+    /**
+     * Aplica el resultado del planificador (pasos e y f del ciclo). v0.5: en el servidor pasó un tiempo desde que se
+     * preparó; una unidad que en ese lapso se averió o entró a mantenimiento no recibe su ruta (sus pedidos siguen por
+     * asignar y entran al ciclo siguiente), y a ningún pedido se le asigna más de lo que le falta.
+     */
+    private void aplicar(Preparacion prep, ResultadoPlan r) {
+        if (estado == Estado.TERMINADA) return;
+        msUltimoPlan = r.ms();
+        msMaximoPlan = Math.max(msMaximoPlan, msUltimoPlan);
+        if (r.error() != null) {
             // v02: en la v01 las unidades quedaban sin tareas hasta el siguiente ciclo porque recortar()
             // ya había borrado sus paradas. Ahora conservan su itinerario anterior.
-            ultimoError = "Planificador: " + e;
-            restaurar(antes);
+            ultimoError = "Planificador: " + r.error();
+            devolver(prep);
             return;
         }
-        msUltimoPlan = (System.nanoTime() - ini) / 1_000_000;
-        msMaximoPlan = Math.max(msMaximoPlan, msUltimoPlan);
+        PlanDistribucion plan = r.plan();
         ultimoError = "";                                    // v02: el planificador volvió a funcionar
         iteraciones = planificador.iteracionesEjecutadas();
         sinPlanificar = plan.getNoPlanificados().size();
         // v03: lo que no se pudo asignar se parte en lotes más pequeños en el ciclo siguiente (una vez por ciclo)
         Set<String> noAsignados = new LinkedHashSet<>();
-        for (pe.pucp.paqrap.planner.model.Pedido x : plan.getNoPlanificados()) noAsignados.add(original.get(x.getId()));
+        for (pe.pucp.paqrap.planner.model.Pedido x : plan.getNoPlanificados()) noAsignados.add(prep.original().get(x.getId()));
         for (String id : noAsignados) {
             Pedido p = pedidos.get(id);
-            if (p != null && p.particion < lotes.length - 1) p.particion++;
+            if (p != null && p.particion < prep.lotes().length - 1) p.particion++;
         }
+        // v0.5, criterio C con el Sa real (Sc / K)
         if (escenario == Escenario.COLAPSO && msUltimoPlan >= saMs) {
-            colapso("C", "el planificador tardó " + msUltimoPlan + " ms (Ta >= Sa)", null);
+            colapso("C", String.format("el planificador tardó %d ms y Sa es %.1f s (Ta >= Sa)", msUltimoPlan, saMs / 1000), null);
             return;
         }
 
         // f) el plan pasa a ser el itinerario de cada unidad
-        for (Ruta r : plan.getRutas()) {
-            Unidad u = unidadPorId.get(r.getVehiculo().getId());
-            if (u == null) continue;
+        for (Ruta ruta : plan.getRutas()) {
+            Unidad u = unidadPorId.get(ruta.getVehiculo().getId());
+            if (u == null || cambioDesdeQueSePreparo(u, prep)) continue;
             boolean refrigerio = false;
             Nodo ultimo = u.nodo;
-            for (ParadaRuta pr : r.getItinerario()) {
+            for (ParadaRuta pr : ruta.getItinerario()) {
                 Nodo n = caminos.nodo(pr.nodo());
                 switch (pr.tipo()) {
                     // El evaluador cuenta el refrigerio antes de la siguiente llegada:
@@ -740,18 +943,179 @@ public final class Simulacion implements Runnable {
                         refrigerio = false;
                     }
                     case ENTREGA -> {
-                        Pedido p = pedidos.get(original.get(pr.referencia()));
-                        if (p == null) continue;
+                        Pedido p = pedidos.get(prep.original().get(pr.referencia()));
+                        int q = p == null ? 0 : Math.min(pr.cantidad(), p.porAsignar());   // v0.5: nunca de más
+                        if (q <= 0) continue;
                         if (refrigerio) u.paradas.addLast(Parada.refrigerio(n));
-                        u.paradas.addLast(Parada.entrega(n, p.id, pr.cantidad()));
-                        p.asignado += pr.cantidad();
+                        u.paradas.addLast(Parada.entrega(n, p.id, q));
+                        p.asignado += q;
                         refrigerio = false;
                     }
                 }
                 ultimo = n;
             }
             if (refrigerio) u.paradas.addLast(Parada.refrigerio(ultimo));
+            if (soloLoNecesario) ajustarRecargas(u);
         }
+        guardarPlan();
+    }
+
+    /** v0.5: ¿la unidad se averió o entró a mantenimiento después de preparar el plan? */
+    private static boolean cambioDesdeQueSePreparo(Unidad u, Preparacion prep) {
+        return u.enMantenimiento || (u.averia != null && !prep.conAveria().contains(u.id));
+    }
+
+    /**
+     * v02: si el planificador falla, cada unidad recupera las paradas que recortar() le soltó (después de la que
+     * conservó) y sus pedidos vuelven a quedar asignados. v0.5: salvo las que se averiaron o entraron a mantenimiento
+     * mientras tanto, cuyos pedidos siguen por asignar.
+     */
+    private void devolver(Preparacion prep) {
+        for (Map.Entry<Unidad, List<Parada>> e : prep.liberadas().entrySet()) {
+            Unidad u = e.getKey();
+            if (e.getValue().isEmpty() || cambioDesdeQueSePreparo(u, prep)) continue;
+            for (Parada p : e.getValue()) {
+                if (p.tipo() == Parada.Tipo.ENTREGA) {
+                    Pedido ped = pedidos.get(p.pedidoId());
+                    if (ped != null) ped.asignado += p.cantidad();
+                }
+                u.paradas.addLast(p);
+            }
+        }
+    }
+
+    /**
+     * v0.5: guarda la última planificación estable (rúbrica G08 a G10): el itinerario completo de cada unidad tal
+     * como quedó tras este ciclo, con la hora estimada de llegada y salida de cada parada y los productos de cada
+     * entrega. Se muestra como reporte al terminar el escenario (5 días o colapso) y se descarga en CSV.
+     */
+    private void guardarPlan() {
+        Map<Unidad, double[][]> h = horarios();
+        Map<Unidad, int[][]> prod = productos();
+        List<FilaPlan> filas = new ArrayList<>();
+        for (Unidad u : unidades) {
+            int i = 0;
+            for (Parada p : u.paradas) {
+                double[] hp = h.get(u)[i];
+                int[] pp = prod.get(u)[i];
+                Pedido ped = p.tipo() == Parada.Tipo.ENTREGA ? pedidos.get(p.pedidoId()) : null;
+                String ref = switch (p.tipo()) {
+                    case ENTREGA -> p.pedidoId();
+                    case RECARGA -> esTrasvase(p.almacenId()) ? "Trasvase de " + p.almacenId().substring(TRASVASE.length())
+                            : nombreAlmacen(p.almacenId());
+                    case REFRIGERIO -> "Refrigerio";
+                };
+                filas.add(new FilaPlan(u.id, u.tipo.name(), ++i, p.tipo().name(), ref, ped == null ? "" : ped.cliente,
+                        p.nodo().x(), p.nodo().y(), p.cantidad(), pp == null ? "" : rangoProductos(p.pedidoId(), pp),
+                        instante(hp[0]).withNano(0), instante(hp[1]).withNano(0)));
+            }
+        }
+        ultimoPlan = filas;
+        ultimoPlanHora = instante(t).withNano(0);
+        ultimoPlanCiclo = ciclos;
+        ultimoPlanSinAsignar = sinPlanificar;
+    }
+
+    private static String rangoProductos(String pedidoId, int[] r) {
+        return r[0] == r[1] ? pedidoId + "-" + r[0] : pedidoId + "-" + r[0] + " a " + pedidoId + "-" + r[1];
+    }
+
+    /**
+     * v0.5: hora estimada de llegada y de salida (segundos simulados) de cada parada del itinerario de cada unidad,
+     * con las mismas reglas que vehiculo(): termina la ocupación actual, recorre la cuadra en curso, viaja por el camino
+     * más corto que respeta los bloqueos y suma 1 h por entrega o refrigerio y el tiempo de trasvase.
+     */
+    private Map<Unidad, double[][]> horarios() {
+        Map<Unidad, double[][]> r = new HashMap<>();
+        for (Unidad u : unidades) {
+            double[][] h = new double[u.paradas.size()][2];
+            double tl = Math.max(t, u.ocupadoHasta);
+            Nodo n = u.nodo;
+            boolean primero = true;
+            int i = 0;
+            for (Parada p : u.paradas) {
+                double km;
+                if (primero && !u.camino.isEmpty()) {
+                    km = u.camino.size() - u.progreso;
+                    Nodo fin = u.camino.peekLast();
+                    if (!fin.equals(p.nodo())) km += km(fin, p.nodo());
+                } else {
+                    km = km(n, p.nodo());
+                }
+                primero = false;
+                tl += u.tipo.segundos(km);
+                h[i][0] = tl;
+                switch (p.tipo()) {
+                    case ENTREGA -> tl += ENTREGA_SEG;
+                    case REFRIGERIO -> tl = inicioRefrigerio(tl) + REFRIGERIO_SEG;
+                    case RECARGA -> {
+                        if (esTrasvase(p.almacenId())) tl += reglas.segundosTrasvase();
+                    }
+                }
+                h[i][1] = tl;
+                n = p.nodo();
+                i++;
+            }
+            r.put(u, h);
+        }
+        return r;
+    }
+
+    /**
+     * v0.5: identificadores de producto de cada entrega (rúbrica E05, E31 y F02). Los productos de un pedido de q
+     * paquetes son P<n>-1 … P<n>-q; los ya entregados son los primeros y el resto se reparte, en orden, entre las
+     * entregas de los itinerarios. Devuelve, por unidad y por parada, {primero, último} (null si no es una entrega).
+     */
+    private Map<Unidad, int[][]> productos() {
+        Map<String, Integer> siguiente = new HashMap<>();
+        Map<Unidad, int[][]> r = new HashMap<>();
+        for (Unidad u : unidades) {
+            int[][] x = new int[u.paradas.size()][];
+            int i = 0;
+            for (Parada p : u.paradas) {
+                if (p.tipo() == Parada.Tipo.ENTREGA && p.cantidad() > 0) {
+                    Pedido ped = pedidos.get(p.pedidoId());
+                    int desde = siguiente.computeIfAbsent(p.pedidoId(), k -> ped == null ? 1 : ped.entregado + 1);
+                    x[i] = new int[]{desde, desde + p.cantidad() - 1};
+                    siguiente.put(p.pedidoId(), desde + p.cantidad());
+                }
+                i++;
+            }
+            r.put(u, x);
+        }
+        return r;
+    }
+
+    /**
+     * v0.5 (recarga.soloLoNecesario=true): cada recarga en un almacén (no los trasvases) carga solo lo que la unidad
+     * entregará hasta su siguiente recarga, descontando lo que ya lleva. Se recorre todo el itinerario desde la carga
+     * actual, así que la parada conservada del ciclo anterior también se ajusta al nuevo plan.
+     */
+    private void ajustarRecargas(Unidad u) {
+        List<Parada> lista = new ArrayList<>(u.paradas);
+        int c = u.carga;
+        for (int i = 0; i < lista.size(); i++) {
+            Parada p = lista.get(i);
+            if (p.tipo() == Parada.Tipo.ENTREGA) {
+                c = Math.max(0, c - p.cantidad());
+            } else if (p.tipo() == Parada.Tipo.RECARGA) {
+                if (esTrasvase(p.almacenId())) {
+                    c = Math.min(u.tipo.capacidad(), c + p.cantidad());
+                    continue;
+                }
+                int necesita = 0;
+                for (int j = i + 1; j < lista.size(); j++) {
+                    Parada q = lista.get(j);
+                    if (q.tipo() == Parada.Tipo.RECARGA) break;
+                    if (q.tipo() == Parada.Tipo.ENTREGA) necesita += q.cantidad();
+                }
+                int carga = Math.max(0, Math.min(u.tipo.capacidad() - c, necesita - c));
+                lista.set(i, Parada.recarga(p.nodo(), p.almacenId(), carga));
+                c += carga;
+            }
+        }
+        u.paradas.clear();
+        u.paradas.addAll(lista);
     }
 
     /**
@@ -763,10 +1127,10 @@ public final class Simulacion implements Runnable {
      * así que sale en las siguientes rutas con espacio. Los indicadores lo siguen contando como vencido (Pedido.limite
      * no cambia) y en el escenario de colapso no aplica: la simulación ya terminó cuando venció el primero.
      */
-    private pe.pucp.paqrap.planner.model.Pedido pedidoParaPlanificar(Pedido p) {
-        boolean vencido = t > p.limite();
+    private pe.pucp.paqrap.planner.model.Pedido pedidoParaPlanificar(Pedido p, double t0) {
+        boolean vencido = t0 > p.limite();
         return new pe.pucp.paqrap.planner.model.Pedido(p.id, p.cliente, caminos.indice(p.nodo), p.nodo.x(), p.nodo.y(),
-                p.porAsignar(), vencido ? instante(t) : instante(p.registro - margenSeg),
+                p.porAsignar(), vencido ? instante(t0) : instante(p.registro - margenSeg),
                 vencido ? PLAZO_VENCIDO_HORAS : p.plazoHoras, null);
     }
 
@@ -782,37 +1146,19 @@ public final class Simulacion implements Runnable {
     private int[] tamanosDeLote() {
         int menor = 0;
         for (Unidad u : unidades) {
-            int c = u.tipo.capacidad;
+            int c = u.tipo.capacidad();
             if (c > menor && c < maximoPorEntrega) menor = c;
         }
         return menor > 0 ? new int[]{maximoPorEntrega, menor} : new int[]{maximoPorEntrega};
     }
 
     /**
-     * v02: deshace recortar() cuando el planificador falla. recortar() conserva un prefijo de las paradas
-     * y libera el resto; aquí se devuelven esas paradas y sus pedidos vuelven a quedar asignados.
-     */
-    private void restaurar(Map<Unidad, List<Parada>> antes) {
-        for (Unidad u : unidades) {
-            List<Parada> previas = antes.get(u);
-            for (int i = u.paradas.size(); i < previas.size(); i++) {
-                Parada p = previas.get(i);
-                if (p.tipo() == Parada.Tipo.ENTREGA) {
-                    Pedido ped = pedidos.get(p.pedidoId());
-                    if (ped != null) ped.asignado += p.cantidad();
-                }
-            }
-            u.paradas.clear();
-            u.paradas.addAll(previas);
-        }
-    }
-
-    /**
      * Conserva la parada hacia la que la unidad ya se mueve (y su refrigerio previo); libera el resto.
      * v03: una unidad averiada no se está moviendo, así que no conserva ninguna.
      */
-    private void recortar(Unidad u) {
+    private List<Parada> recortar(Unidad u) {
         List<Parada> conservar = new ArrayList<>();
+        List<Parada> soltadas = new ArrayList<>();
         boolean enMovimiento = !u.camino.isEmpty() && u.averia == null;
         boolean cerrado = !enMovimiento;
         for (Parada p : u.paradas) {
@@ -822,9 +1168,11 @@ public final class Simulacion implements Runnable {
                 continue;
             }
             liberar(p);
+            soltadas.add(p);
         }
         u.paradas.clear();
         u.paradas.addAll(conservar);
+        return soltadas;
     }
 
     /** km entre dos nodos respetando bloqueos (Manhattan si no hay camino). */
@@ -834,7 +1182,7 @@ public final class Simulacion implements Runnable {
     }
 
     /** Dónde, cuándo y con cuánta carga queda libre la unidad tras sus paradas conservadas. */
-    private Vehiculo vehiculo(Unidad u, Map<String, Integer> reservado) {
+    private Vehiculo vehiculo(Unidad u, Map<String, Integer> reservado, double t0) {
         double tl = Math.max(t, u.ocupadoHasta);
         Nodo n = u.nodo;
         int carga = u.carga;
@@ -861,18 +1209,20 @@ public final class Simulacion implements Runnable {
                     if (esTrasvase(p.almacenId())) {
                         // v03: recoge lo que aún no reservaron otras unidades; el trasvase toma 30 min
                         int libre = Math.max(0, saldoTrasvase(p.almacenId()) - reservado.getOrDefault(p.almacenId(), 0));
-                        int q = Math.min(u.tipo.capacidad - carga, libre);
+                        int q = Math.min(u.tipo.capacidad() - carga, libre);
                         reservado.merge(p.almacenId(), q, Integer::sum);
                         carga += q;
                         tl += reglas.segundosTrasvase();
                     } else {
-                        reservado.merge(p.almacenId(), u.tipo.capacidad - carga, Integer::sum);
-                        carga = u.tipo.capacidad;
+                        // v0.5: con recarga.soloLoNecesario la parada indica cuánto cargará
+                        int q = soloLoNecesario ? Math.min(u.tipo.capacidad() - carga, p.cantidad()) : u.tipo.capacidad() - carga;
+                        reservado.merge(p.almacenId(), q, Integer::sum);
+                        carga += q;
                     }
                 }
                 case REFRIGERIO -> {
                     turnoRefrigerio = TurnoConductor.vigenteEn(instante(tl)).getInicio();
-                    tl += REFRIGERIO_SEG;
+                    tl = inicioRefrigerio(tl) + REFRIGERIO_SEG;
                 }
             }
         }
@@ -881,12 +1231,22 @@ public final class Simulacion implements Runnable {
             tl += u.tipo.segundos(u.camino.size() - u.progreso);
             n = u.camino.peekLast();
         }
+        tl = Math.max(tl, t0);   // v0.5: no empieza su nueva ruta antes de que llegue el plan
         Vehiculo v = new Vehiculo(u.id, TipoVehiculo.valueOf(u.tipo.name()), caminos.indice(n), instante(tl));
         v.setCarga(carga);
         TurnoConductor turno = TurnoConductor.vigenteEn(instante(tl));
         turno.setRefrigerioConsumido(turno.getInicio().equals(turnoRefrigerio));
         v.setTurno(turno);
         return v;
+    }
+
+    /**
+     * v0.5: el refrigerio empieza al llegar, pero nunca antes de la hora permitida: al menos 1 h después del cambio
+     * de turno (situación auténtica). Puede ocurrir si la unidad llega antes de lo que estimó el planificador.
+     */
+    private double inicioRefrigerio(double tl) {
+        double desde = segundos(TurnoConductor.vigenteEn(instante(tl)).getRefrigerioDesde());
+        return Math.max(tl, desde);
     }
 
     // ------------------------------------------------------------------ ejecución del itinerario
@@ -926,7 +1286,7 @@ public final class Simulacion implements Runnable {
                 continue;
             }
 
-            double velKmS = u.tipo.velocidadKmh / 3600.0;
+            double velKmS = u.tipo.velocidadKmh() / 3600.0;
             double faltaKm = 1.0 - u.progreso;
             double necesario = faltaKm / velKmS;
             if (tl + necesario <= hasta) {
@@ -946,7 +1306,7 @@ public final class Simulacion implements Runnable {
     private void recorrer(Unidad u, double km) {
         u.km += km;
         kmTotal += km;
-        costo += km * u.tipo.costoKm;
+        costo += km * u.tipo.costoKm();
     }
 
     private void ejecutar(Unidad u, Parada p, double tl) {
@@ -957,6 +1317,9 @@ public final class Simulacion implements Runnable {
                 ped.asignado -= p.cantidad();
                 int q = Math.min(Math.min(u.carga, p.cantidad()), ped.cantidad - ped.entregado);
                 if (q <= 0) return;                              // sin carga: se replanifica
+                // v0.5: productos P<n>-<k> entregados, en orden, y el almacén del que salieron
+                entregasRecientes.addLast(new EntregaHecha(ped.id, ped.cliente, ped.nodo, u.id, q, ped.entregado + 1,
+                        ped.entregado + q, u.origenId, tl));
                 ped.entregado += q;
                 u.carga -= q;
                 u.ocupadoHasta = tl + ENTREGA_SEG;
@@ -975,13 +1338,17 @@ public final class Simulacion implements Runnable {
                 }
                 for (Almacen a : almacenes) {
                     if (!a.id.equals(p.almacenId())) continue;
-                    int q = Math.min(u.tipo.capacidad - u.carga, a.stock);
+                    int quiere = soloLoNecesario ? Math.min(u.tipo.capacidad() - u.carga, p.cantidad()) : u.tipo.capacidad() - u.carga;
+                    int q = Math.min(quiere, a.stock);
                     if (!a.infinito()) a.stock -= q;
+                    u.origenId = a.id;                   // v0.5: lo que lleva a bordo sale de este almacén
+                    u.salidaOrigen = tl;                 // la carga es instantánea: sale en este instante
                     u.carga += q;
                 }
             }
             case REFRIGERIO -> {
-                u.ocupadoHasta = tl + REFRIGERIO_SEG;
+                // v0.5: si la unidad llega antes de la ventana (1 h después del cambio de turno), espera a que se abra
+                u.ocupadoHasta = inicioRefrigerio(tl) + REFRIGERIO_SEG;
                 u.ocupacion = "REFRIGERIO";
                 u.turnoConRefrigerio = TurnoConductor.vigenteEn(instante(tl)).getInicio();
             }
@@ -997,7 +1364,7 @@ public final class Simulacion implements Runnable {
         Unidad averiada = unidadPorId.get(p.almacenId().substring(TRASVASE.length()));
         Averia av = averiada == null ? null : averiada.averia;
         int q = av == null || av.fase != Averia.Fase.EN_LUGAR ? 0
-                : Math.min(receptora.tipo.capacidad - receptora.carga, averiada.carga);
+                : Math.min(receptora.tipo.capacidad() - receptora.carga, averiada.carga);
         if (q < p.cantidad()) proximoCiclo = Math.min(proximoCiclo, t);
         if (q <= 0) return;
         averiada.carga -= q;
@@ -1039,11 +1406,7 @@ public final class Simulacion implements Runnable {
     /** v03: hasta cuándo una unidad no está disponible (avería o mantenimiento); null si está operativa. */
     private LocalDateTime noDisponibleHasta(Unidad u) {
         LocalDateTime hasta = null;
-        if (u.enMantenimiento) {
-            LocalDate dia = instante(t).toLocalDate().plusDays(1);
-            for (int i = 0; i < 31 && mantenimiento.enMantenimiento(u.id, dia); i++) dia = dia.plusDays(1);
-            hasta = dia.atStartOfDay();
-        }
+        if (u.enMantenimiento) hasta = mantenimiento.finMantenimiento(u.id, instante(t));   // v0.5: según su tipo
         if (u.averia != null) {
             LocalDateTime fin = instante(u.averia.disponible);
             if (hasta == null || fin.isAfter(hasta)) hasta = fin;
@@ -1075,6 +1438,7 @@ public final class Simulacion implements Runnable {
                 .append(",\"escenario\":").append(Json.str(escenario.name()))
                 .append(",\"algoritmo\":").append(Json.str(planificador.nombre()))
                 .append(",\"inicio\":").append(Json.str(inicio.toString()))
+                .append(",\"mapa\":{\"ancho\":").append(anchoMapa()).append(",\"alto\":").append(altoMapa()).append('}')
                 .append(",\"hora\":").append(Json.str(instante(t).withNano(0).toString()))
                 .append(",\"horasTranscurridas\":").append(Json.num(t / 3600.0))
                 .append(",\"segundosReales\":").append(Json.num(nsReales / 1e9))
@@ -1093,7 +1457,18 @@ public final class Simulacion implements Runnable {
                 .append(",\"tc\":").append(tcHoras < 0 ? "null" : Json.num(tcHoras))
                 .append(",\"colapso\":").append(colapsoJson == null ? "null" : colapsoJson)
                 .append(",\"lineasConError\":").append(fuente.lineasConError() + mantenimiento.errores())
-                .append(",\"error\":").append(Json.str(ultimoError));
+                .append(",\"error\":").append(Json.str(ultimoError))
+                .append(",\"configVersion\":").append(cfg.version())
+                .append(",\"velocidadPendiente\":").append(velocidadesPendientes != null);
+
+        b.append(",\"t\":").append(Math.round(t))
+                .append(",\"ventanaHoras\":").append(Json.num(ventanaSeg / 3600.0))
+                .append(",\"plan\":").append(ultimoPlanHora == null ? "null" : "{\"hora\":" + hora(ultimoPlanHora)
+                        + ",\"ciclo\":" + ultimoPlanCiclo + "}");
+
+        // v0.5: horarios estimados y productos de cada parada (paneles de unidades, almacenes y envíos)
+        Map<Unidad, double[][]> horas = horarios();
+        Map<Unidad, int[][]> prod = productos();
 
         // ---- resumen de indicadores (con su nivel de semáforo)
         int[] fl = contarFlota();
@@ -1102,12 +1477,26 @@ public final class Simulacion implements Runnable {
         int pendientes = 0;
         for (Pedido p : pedidos.values()) if (!p.completo()) pendientes++;
         double pct = pctATiempo();
+        // v0.5: indicadores globales (rúbrica G01 a G04): ocupación de la flota en servicio y stock de los intermedios
+        int cargaFlota = 0, capFlota = 0, stockInt = 0, capInt = 0;
+        for (Unidad u : unidades) {
+            if (u.enMantenimiento || u.averia != null) continue;
+            cargaFlota += u.carga;
+            capFlota += u.tipo.capacidad();
+        }
+        for (Almacen a : almacenes) {
+            if (a.infinito()) continue;
+            stockInt += a.stock;
+            capInt += a.capacidad;
+        }
+        double pctFlota = capFlota == 0 ? 0 : 100.0 * cargaFlota / capFlota;
+        double pctAlm = capInt == 0 ? 0 : 100.0 * stockInt / capInt;
         b.append(",\"resumen\":{")
                 .append("\"recibidos\":").append(recibidos)
                 .append(",\"entregados\":").append(completados)
                 .append(",\"aTiempo\":").append(enPlazo)
                 .append(",\"pctATiempo\":").append(Json.num(pct))
-                .append(",\"nivelATiempo\":").append(Json.str(semaforo.mayorEsMejor("plazo", pct, 95, 85).name()))
+                .append(",\"nivelATiempo\":").append(Json.str(semaforo.mayorEsMejor("plazo", pct, Indicadores.PLAZO_VERDE, Indicadores.PLAZO_AMBAR).name()))
                 .append(",\"vencidos\":").append(vencidos)
                 .append(",\"vencidosSinEntregar\":").append(vencidosSinEntregar())
                 .append(",\"pendientes\":").append(pendientes)
@@ -1122,17 +1511,62 @@ public final class Simulacion implements Runnable {
                 .append(",\"trasvasados\":").append(trasvasados)
                 .append(",\"devueltos\":").append(devueltos)
                 .append(",\"flota\":").append(unidades.size())
+                .append(",\"cargaFlota\":").append(cargaFlota).append(",\"capacidadFlota\":").append(capFlota)
+                .append(",\"pctFlota\":").append(Json.num(pctFlota))
+                .append(",\"nivelFlota\":").append(Json.str(semaforo.stock("flota", pctFlota, Indicadores.FLOTA_VERDE, Indicadores.FLOTA_AMBAR).name()))
+                .append(",\"stockIntermedios\":").append(stockInt).append(",\"capacidadIntermedios\":").append(capInt)
+                .append(",\"pctAlmacenes\":").append(Json.num(pctAlm))
+                .append(",\"nivelAlmacenes\":").append(Json.str(semaforo.stock("almacen", pctAlm, Indicadores.ALMACEN_VERDE, Indicadores.ALMACEN_AMBAR).name()))
                 .append(",\"km\":").append(Json.num(Math.round(kmTotal)))
                 .append(",\"costo\":").append(Json.num(Math.round(costo)))
                 .append('}');
 
         // ---- quién atiende cada pedido y qué unidades van a recargar a cada almacén
+        // v0.5: además, los envíos de cada pedido (unidad, cantidad, productos, almacén de salida, hora de salida y de
+        // llegada) y, por almacén, lo que está en tránsito y lo que sale en las próximas horas (rúbrica E20, E21, E31)
         Map<String, Set<String>> atendidoPor = new HashMap<>();
         Map<String, Set<String>> vanARecargar = new HashMap<>();
+        Map<String, List<String>> enviosPedido = new HashMap<>();
+        Map<String, List<String>> transito = new HashMap<>(), porSalir = new HashMap<>();
+        Map<String, int[]> totTransito = new HashMap<>(), totPorSalir = new HashMap<>();   // {envíos, paquetes}
+        Map<String, Integer> aBordo = new HashMap<>();
         for (Unidad u : unidades) {
+            if (u.carga > 0 && u.averia == null) aBordo.merge(u.origenId, u.carga, Integer::sum);
+            double[][] h = horas.get(u);
+            int[][] pr = prod.get(u);
+            String de = u.origenId;
+            double sale = u.salidaOrigen;
+            int i = 0;
             for (Parada p : u.paradas) {
-                if (p.tipo() == Parada.Tipo.ENTREGA) atendidoPor.computeIfAbsent(p.pedidoId(), k -> new LinkedHashSet<>()).add(u.id);
-                if (p.tipo() == Parada.Tipo.RECARGA) vanARecargar.computeIfAbsent(p.almacenId(), k -> new LinkedHashSet<>()).add(u.id);
+                if (p.tipo() == Parada.Tipo.RECARGA) {
+                    vanARecargar.computeIfAbsent(p.almacenId(), k -> new LinkedHashSet<>()).add(u.id);
+                    de = p.almacenId();
+                    sale = h[i][1];
+                } else if (p.tipo() == Parada.Tipo.ENTREGA) {
+                    atendidoPor.computeIfAbsent(p.pedidoId(), k -> new LinkedHashSet<>()).add(u.id);
+                    Pedido ped = pedidos.get(p.pedidoId());
+                    String e = "{\"u\":" + Json.str(u.id) + ",\"q\":" + p.cantidad()
+                            + (pr[i] == null ? "" : ",\"p0\":" + pr[i][0] + ",\"p1\":" + pr[i][1])
+                            + ",\"de\":" + Json.str(de) + ",\"sal\":" + (sale < 0 ? -1 : Math.round(sale))
+                            + ",\"ll\":" + Math.round(h[i][0]) + ",\"orden\":" + (i + 1)
+                            + ",\"cli\":" + Json.str(ped == null ? "" : ped.cliente)
+                            + ",\"x\":" + p.nodo().x() + ",\"y\":" + p.nodo().y() + ",\"pedido\":" + Json.str(p.pedidoId()) + "}";
+                    enviosPedido.computeIfAbsent(p.pedidoId(), k -> new ArrayList<>()).add(e);
+                    if (!esTrasvase(de)) {
+                        if (sale >= 0 && sale <= t) {
+                            totTransito.computeIfAbsent(de, k -> new int[2])[0]++;
+                            totTransito.get(de)[1] += p.cantidad();
+                            List<String> l = transito.computeIfAbsent(de, k -> new ArrayList<>());
+                            if (l.size() < 150) l.add(e);
+                        } else if (sale > t && sale <= t + ventanaSeg) {
+                            totPorSalir.computeIfAbsent(de, k -> new int[2])[0]++;
+                            totPorSalir.get(de)[1] += p.cantidad();
+                            List<String> l = porSalir.computeIfAbsent(de, k -> new ArrayList<>());
+                            if (l.size() < 150) l.add(e);
+                        }
+                    }
+                }
+                i++;
             }
         }
 
@@ -1144,14 +1578,38 @@ public final class Simulacion implements Runnable {
                     .append(",\"x\":").append(a.nodo.x()).append(",\"y\":").append(a.nodo.y())
                     .append(",\"central\":").append(a.infinito());
             if (!a.infinito()) {
-                // v0.4.1: el semáforo del almacén intermedio va por % de stock respecto de su capacidad
+                // v0.4.1: el semáforo del almacén intermedio va por % de stock; v0.5: con VACIO si no le queda stock
                 double stockPct = 100.0 * a.stock / a.capacidad;
                 b.append(",\"stock\":").append(a.stock).append(",\"capacidad\":").append(a.capacidad)
                         .append(",\"stockPct\":").append(Json.num(stockPct))
-                        .append(",\"nivel\":").append(Json.str(semaforo.mayorEsMejor("almacen", stockPct, 30, 10).name()));
+                        .append(",\"nivel\":").append(Json.str(semaforo.stock("almacen", stockPct, Indicadores.ALMACEN_VERDE, Indicadores.ALMACEN_AMBAR).name()));
             }
             b.append(",\"recargan\":");
             lista(b, vanARecargar.getOrDefault(a.id, Set.of()));
+            // v0.5: envíos en tránsito, por salir y entregados en la ventana (panel de almacenes)
+            int[] tt = totTransito.getOrDefault(a.id, new int[2]), ts = totPorSalir.getOrDefault(a.id, new int[2]);
+            b.append(",\"aBordo\":").append(aBordo.getOrDefault(a.id, 0))
+                    .append(",\"transito\":{\"envios\":").append(tt[0]).append(",\"paquetes\":").append(tt[1])
+                    .append(",\"lista\":[").append(String.join(",", transito.getOrDefault(a.id, List.of()))).append("]}")
+                    .append(",\"porSalir\":{\"envios\":").append(ts[0]).append(",\"paquetes\":").append(ts[1])
+                    .append(",\"lista\":[").append(String.join(",", porSalir.getOrDefault(a.id, List.of()))).append("]}");
+            int ne = 0, nq = 0;
+            StringBuilder le = new StringBuilder();
+            for (java.util.Iterator<EntregaHecha> it = entregasRecientes.descendingIterator(); it.hasNext(); ) {
+                EntregaHecha e = it.next();
+                if (!a.id.equals(e.almacen())) continue;
+                ne++;
+                nq += e.cantidad();
+                if (ne > 150) continue;
+                if (le.length() > 0) le.append(',');
+                le.append("{\"pedido\":").append(Json.str(e.pedidoId())).append(",\"cli\":").append(Json.str(e.cliente()))
+                        .append(",\"u\":").append(Json.str(e.unidad())).append(",\"q\":").append(e.cantidad())
+                        .append(",\"p0\":").append(e.p0()).append(",\"p1\":").append(e.p1())
+                        .append(",\"x\":").append(e.destino().x()).append(",\"y\":").append(e.destino().y())
+                        .append(",\"hora\":").append(Math.round(e.hora())).append('}');
+            }
+            b.append(",\"entregados\":{\"envios\":").append(ne).append(",\"paquetes\":").append(nq)
+                    .append(",\"lista\":[").append(le).append("]}");
             b.append('}');
         }
         b.append(']');
@@ -1160,12 +1618,17 @@ public final class Simulacion implements Runnable {
         for (int i = 0; i < unidades.size(); i++) {
             Unidad u = unidades.get(i);
             if (i > 0) b.append(',');
-            double ocup = 100.0 * u.carga / u.tipo.capacidad;
+            double ocup = 100.0 * u.carga / u.tipo.capacidad();
             b.append("{\"id\":").append(Json.str(u.id)).append(",\"tipo\":").append(Json.str(u.tipo.name()))
                     .append(",\"x\":").append(Json.num(u.x())).append(",\"y\":").append(Json.num(u.y()))
-                    .append(",\"carga\":").append(u.carga).append(",\"capacidad\":").append(u.tipo.capacidad)
-                    .append(",\"nivel\":").append(Json.str(semaforo.menorEsMejor("carga", ocup, 70, 90).name()))
-                    .append(",\"estado\":").append(Json.str(estadoUnidad(u))).append(",\"km\":").append(Json.num(Math.round(u.km)));
+                    .append(",\"carga\":").append(u.carga).append(",\"capacidad\":").append(u.tipo.capacidad())
+                    .append(",\"ocupacion\":").append(Json.num(ocup))
+                    // v0.5: semáforo + vacío de la carga (verde bien cargada … rojo casi sin carga, VACIO sin carga)
+                    .append(",\"nivel\":").append(Json.str(semaforo.stock("carga", ocup, Indicadores.CARGA_VERDE, Indicadores.CARGA_AMBAR).name()))
+                    .append(",\"estado\":").append(Json.str(estadoUnidad(u))).append(",\"km\":").append(Json.num(Math.round(u.km)))
+                    .append(",\"origen\":").append(Json.str(u.origenId))
+                    .append(",\"salida\":").append(u.salidaOrigen < 0 ? -1 : Math.round(u.salidaOrigen))
+                    .append(",\"ocupadoHasta\":").append(Math.round(Math.max(t, u.ocupadoHasta)));
             // v03: avería vigente y hasta cuándo no está disponible (avería o mantenimiento)
             Averia av = u.averia;
             if (av == null) b.append(",\"averia\":null");
@@ -1184,14 +1647,19 @@ public final class Simulacion implements Runnable {
                 primero = false;
             }
             b.append("],\"paradas\":[");
-            primero = true;
+            double[][] h = horas.get(u);
+            int[][] pr = prod.get(u);
+            int k = 0;
             for (Parada p : u.paradas) {
-                if (!primero) b.append(',');
+                if (k > 0) b.append(',');
                 b.append("{\"x\":").append(p.nodo().x()).append(",\"y\":").append(p.nodo().y())
                         .append(",\"tipo\":").append(Json.str(p.tipo().name()))
                         .append(",\"ref\":").append(Json.str(p.tipo() == Parada.Tipo.ENTREGA ? p.pedidoId() : p.tipo() == Parada.Tipo.RECARGA ? p.almacenId() : "refrigerio"))
-                        .append(",\"cantidad\":").append(p.cantidad()).append('}');
-                primero = false;
+                        .append(",\"cantidad\":").append(p.cantidad())
+                        .append(",\"ll\":").append(Math.round(h[k][0])).append(",\"sa\":").append(Math.round(h[k][1]));
+                if (pr[k] != null) b.append(",\"p0\":").append(pr[k][0]).append(",\"p1\":").append(pr[k][1]);
+                b.append('}');
+                k++;
             }
             b.append("]}");
         }
@@ -1215,6 +1683,8 @@ public final class Simulacion implements Runnable {
                     .append(",\"nivel\":").append(Json.str(p.vencido ? "ROJO" : semaforo.pedido(frac).name()))
                     .append(",\"unidades\":");
             lista(b, atendidoPor.getOrDefault(p.id, Set.of()));
+            // v0.5: envíos del pedido (una entrada por unidad y entrega parcial), rúbrica E31, F02 y F03
+            b.append(",\"envios\":[").append(String.join(",", enviosPedido.getOrDefault(p.id, List.of()))).append(']');
             b.append('}');
             if (n >= 3000) break;
         }
@@ -1303,6 +1773,68 @@ public final class Simulacion implements Runnable {
             averiaJson(b, averias.get(i), Set.of());
         }
         return b.append(']').toString();
+    }
+
+    // ---- v0.5: reporte de la última planificación estable (rúbrica G08 a G10)
+
+    /** El último plan en JSON: hora, ciclo, algoritmo y las paradas de cada unidad; {"plan":null} si aún no hay. */
+    public synchronized String planJson() {
+        if (ultimoPlan == null) return "{\"plan\":null}";
+        StringBuilder b = new StringBuilder(256 + 220 * ultimoPlan.size());
+        b.append("{\"plan\":{\"hora\":").append(hora(ultimoPlanHora))
+                .append(",\"ciclo\":").append(ultimoPlanCiclo)
+                .append(",\"algoritmo\":").append(Json.str(planificador.nombre()))
+                .append(",\"escenario\":").append(Json.str(escenario.name()))
+                .append(",\"inicio\":").append(hora(inicio))
+                .append(",\"sinAsignar\":").append(ultimoPlanSinAsignar)
+                .append(",\"filas\":[");
+        for (int i = 0; i < ultimoPlan.size(); i++) {
+            FilaPlan f = ultimoPlan.get(i);
+            if (i > 0) b.append(',');
+            b.append("{\"unidad\":").append(Json.str(f.unidad())).append(",\"tipoUnidad\":").append(Json.str(f.tipoUnidad()))
+                    .append(",\"orden\":").append(f.orden()).append(",\"tipo\":").append(Json.str(f.tipo()))
+                    .append(",\"ref\":").append(Json.str(f.referencia())).append(",\"cliente\":").append(Json.str(f.cliente()))
+                    .append(",\"x\":").append(f.x()).append(",\"y\":").append(f.y())
+                    .append(",\"cantidad\":").append(f.cantidad()).append(",\"productos\":").append(Json.str(f.productos()))
+                    .append(",\"llegada\":").append(hora(f.llegada())).append(",\"salida\":").append(hora(f.salida())).append('}');
+        }
+        return b.append("]}}").toString();
+    }
+
+    /** El último plan en CSV (separador ';' para abrirlo directo en Excel en español); null si aún no hay plan. */
+    public synchronized String planCsv() {
+        if (ultimoPlan == null) return null;
+        java.time.format.DateTimeFormatter f = java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
+        StringBuilder b = new StringBuilder("\uFEFF");
+        b.append("Última planificación estable;").append(ultimoPlanHora.format(f)).append(";ciclo ").append(ultimoPlanCiclo)
+                .append(";").append(planificador.nombre()).append("\r\n");
+        b.append("Unidad;Tipo de unidad;Orden;Parada;Referencia;Cliente;X;Y;Cantidad;Productos;Llegada;Salida\r\n");
+        for (FilaPlan x : ultimoPlan) {
+            b.append(x.unidad()).append(';').append(x.tipoUnidad()).append(';').append(x.orden()).append(';')
+                    .append(switch (x.tipo()) { case "ENTREGA" -> "Entrega"; case "RECARGA" -> "Recarga"; default -> "Refrigerio"; })
+                    .append(';').append(x.referencia()).append(';').append(x.cliente()).append(';').append(x.x()).append(';')
+                    .append(x.y()).append(';').append(x.cantidad()).append(';').append(x.productos()).append(';')
+                    .append(x.llegada().format(f)).append(';').append(x.salida().format(f)).append("\r\n");
+        }
+        return b.toString();
+    }
+
+    /** v0.5: las reglas de las averías cambiaron en la pantalla Configuración; rigen para las averías siguientes. */
+    public synchronized void recargarReglasAveria() {
+        reglas = new ReglasAveria(cfg);
+    }
+
+    /**
+     * v0.5: nuevas velocidades por tipo (pantalla Configuración). Se aplican al empezar el siguiente ciclo de
+     * planificación (P&R 16): desde allí las unidades se mueven y se planifican con ellas.
+     */
+    public synchronized void programarVelocidades(Map<pe.pucp.paqrap.planner.model.TipoVehiculo, Double> v) {
+        if (velocidadesPendientes == null) velocidadesPendientes = new java.util.EnumMap<>(pe.pucp.paqrap.planner.model.TipoVehiculo.class);
+        velocidadesPendientes.putAll(v);
+    }
+
+    public synchronized String umbralesJson() {
+        return semaforo.umbralesJson();
     }
 
     // ---- v03: acceso para las pruebas del paquete
