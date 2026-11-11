@@ -1,4 +1,4 @@
-Carpeta de datos de RUTAPAQ (v0.5.0).
+Carpeta de datos de RUTAPAQ (rutapaqS13v1).
 
 Contiene los archivos publicados por el profesor (versión v20260909), enero 2026 a diciembre 2028:
 
@@ -7,11 +7,17 @@ Contiene los archivos publicados por el profesor (versión v20260909), enero 202
   bloqueo.aamm.txt           bloqueos    ##d##h##m-##d##h##m:x1,y1,x2,y2,...
                                          ej. 01d02h22m-01d04h42m:25,45,45,45,45,40
   mant.preventivo.09.10.txt  mantenimiento preventivo, aaaammdd:TTNN  (ej. 20260901:TA01); empieza a las
-                             00:00 y dura mantenimiento.horas.<tipo> horas (24 por defecto, v0.5.0)
+                             00:00 y dura mantenimiento.horas.<tipo> horas (48 por defecto, P&R 19 del
+                             03/11/2026)
                              El plan es bimensual y se repite cada 2 meses: setiembre vale para
                              los meses impares y octubre para los pares.
   Las averías no se leen de archivo: solo se registran de forma manual desde el visualizador
   (botón Registrar avería), por indicación del profesor.
+
+Operación día a día (menú Tiempo real, rutapaqS13v1): no lee los archivos de ventas; usa los bloqueos y el
+mantenimiento de esta carpeta con la fecha real. Los pedidos que se registran en línea se guardan en
+registrados/ventas.aaaamm.txt (mismo formato que los de ventas). Esa subcarpeta la crea el servidor; los archivos
+de esta carpeta no se modifican.
 
 Para usar otra versión de los datos, reemplace los archivos manteniendo los nombres.
 Si una línea no tiene el formato esperado, el servidor la informa en la consola y el
