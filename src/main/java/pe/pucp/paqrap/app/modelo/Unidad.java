@@ -18,7 +18,7 @@ public final class Unidad {
     public String ocupacion = "";
     public LocalDateTime turnoConRefrigerio;               // inicio del turno en que ya tomó refrigerio
     public double km;
-    public boolean enMantenimiento;                        // v02: día de mantenimiento preventivo
+    public boolean enMantenimiento;                        // v02: en mantenimiento preventivo (S13v1: 48 h por defecto)
     public Averia averia;                                  // v03: avería vigente (null si la unidad está operativa)
     /** v0.5: almacén donde hizo su última recarga (de allí sale lo que lleva a bordo) y cuándo salió de él. */
     public String origenId;

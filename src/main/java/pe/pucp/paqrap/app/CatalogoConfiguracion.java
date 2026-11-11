@@ -14,14 +14,15 @@ import java.util.Map;
  *   AHORA  - en la simulación en curso, al guardar (semáforo y reglas de las averías siguientes);
  *   CICLO  - en el siguiente ciclo de planificación (velocidad por tipo, P&amp;R preguntas 15 y 16);
  *   INICIO - al iniciar la próxima simulación (mapa, almacenes, cantidad, capacidad y costo de la flota, mantenimiento;
- *            P&amp;R pregunta 9: la flota solo cambia al inicio de una ejecución).
+ *            P&amp;R pregunta 9: la flota solo cambia al inicio de una ejecución). S13v1: en la operación día a día,
+ *            al reabrir las operaciones.
  */
 public final class CatalogoConfiguracion {
 
     public enum Tipo { ENTERO, DECIMAL, PUNTO, HORA, BOOLEANO }
 
     public enum Aplica {
-        AHORA("Se aplica ahora"), CICLO("En el siguiente ciclo de planificación"), INICIO("Al iniciar la próxima simulación");
+        AHORA("Se aplica ahora"), CICLO("En el siguiente ciclo de planificación"), INICIO("Al iniciar la próxima simulación o al reabrir las operaciones");
         public final String texto;
 
         Aplica(String texto) {
@@ -44,7 +45,8 @@ public final class CatalogoConfiguracion {
             new Seccion("averia2", "Avería tipo 2 · intermedia", "B08", "Permanece en el lugar y luego pasa de forma instantánea al almacén central. Vuelve a estar disponible al final del turno siguiente al de la avería."),
             new Seccion("averia3", "Avería tipo 3 · mayor", "B09", "Permanece en el lugar las mismas horas que el tipo 2 y luego pasa al almacén central."),
             new Seccion("trasvase", "Trasvase (averías 2 y 3)", "B08 · B09", "Mientras la unidad averiada sigue en el lugar, otra puede recoger sus paquetes."),
-            new Seccion("mantenimiento", "Mantenimiento preventivo", "P&R 19", "Duración por tipo, desde las 00:00 del día indicado en el plan (archivo mant.preventivo)."),
+            new Seccion("mantenimiento", "Mantenimiento preventivo", "P&R 19", "Duración por tipo, desde las 00:00 del día indicado en el plan (archivo mant.preventivo). P&R 19 (03/11/2026): 48 h para todos los tipos."),
+            new Seccion("diario", "Operación día a día", "Tiempo real", "Planificación programada cada N minutos, alineada al reloj de Lima (K = 1, así que Sa = Sc). Además, registrar un pedido o una avería replanifica de inmediato."),
             new Seccion("semaforo", "Semáforo", "B06", "El rojo siempre es peligro; vacío (gris) cuando no hay nada. Verde desde el primer valor, ámbar desde el segundo, rojo por debajo."));
 
     public static final List<Campo> CAMPOS;
@@ -76,7 +78,9 @@ public final class CatalogoConfiguracion {
         // Mantenimiento por tipo
         c.add(new Campo("mantenimiento.horas.auto", "mantenimiento", null, "Auto", Tipo.DECIMAL, 1, 240, 1, "horas", Aplica.INICIO, null));
         c.add(new Campo("mantenimiento.horas.moto", "mantenimiento", null, "Moto", Tipo.DECIMAL, 1, 240, 1, "horas", Aplica.INICIO, null));
-        c.add(new Campo("mantenimiento.horas.bici", "mantenimiento", null, "Bicicleta", Tipo.DECIMAL, 1, 240, 1, "horas", Aplica.INICIO, "Borrador de la P&R: bicicleta 7 (hasta las 07:00), moto 24, auto 48"));
+        c.add(new Campo("mantenimiento.horas.bici", "mantenimiento", null, "Bicicleta", Tipo.DECIMAL, 1, 240, 1, "horas", Aplica.INICIO, null));
+        // S13v1: operación día a día
+        c.add(new Campo("escenario.diario.saMinutos", "diario", null, "Planificar cada", Tipo.DECIMAL, 1, 60, 1, "minutos", Aplica.INICIO, "Sa = Sc, porque en la operación día a día K = 1"));
         // Semáforo (B06)
         for (String[] s : new String[][]{{"almacen", "Stock de un almacén intermedio", "%"}, {"carga", "Carga de una unidad", "%"},
                 {"flota", "Ocupación de la flota", "%"}, {"plazo", "Pedidos entregados a tiempo", "%"}}) {

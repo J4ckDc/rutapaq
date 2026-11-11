@@ -23,7 +23,8 @@
         <svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></svg>
         <span>Panel de Control</span>
       </button>
-      <button class="nav-item" disabled title="Disponible en una próxima versión">
+      <!-- S13v1: operación día a día (corre siempre, a la hora actual de Lima) -->
+      <button class="nav-item" id="navTiempoReal" title="Operación día a día: hora actual, pedidos y averías registrados en línea">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M5.2 18.8l2.1-2.1M16.7 7.3l2.1-2.1"/></svg>
         <span>Tiempo real</span>
       </button>
@@ -49,39 +50,50 @@
       <button class="icono-btn" id="plegarMenu" aria-label="Plegar menú" title="Plegar menú">
         <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg>
       </button>
-      <span class="version">v0.5.0</span>
+      <span class="version">rutapaqS13v1</span>
     </div>
   </aside>
 
   <!-- ============================== barra superior -->
   <header class="barra">
     <div class="grupo-control">
-      <label class="campo-fecha" title="Fecha y hora de inicio de la simulación">
+      <label class="campo-fecha solo-sim" title="Fecha y hora de inicio de la simulación">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
         <input id="fecha" type="datetime-local" step="60" aria-label="Fecha y hora de inicio">
       </label>
-      <div class="segmentado" role="group" aria-label="Modo de simulación">
+      <div class="segmentado solo-sim" role="group" aria-label="Modo de simulación">
         <button class="seg activo" id="modo5d" aria-pressed="true">5 Días</button>
         <button class="seg" id="modoColapso" aria-pressed="false" title="Simulación hasta el colapso: continúa hasta que un pedido no se entregue a tiempo">Colapso</button>
       </div>
+      <!-- S13v1: en Tiempo real no hay fecha de inicio ni modo; se registran pedidos y se cierran las operaciones (G09) -->
+      <span class="etiqueta-modo solo-diario" title="Operación día a día: el reloj es la fecha y hora actual">Tiempo real</span>
       <div class="controles">
-        <button class="btn primario" id="btnIniciar" title="Iniciar" aria-label="Iniciar">
+        <button class="btn primario solo-diario" id="btnRegistrarPedido" title="Registrar un pedido en este momento">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg><span>Registrar pedido</span>
+        </button>
+        <button class="btn solo-diario" id="btnCerrarOp" title="Cerrar las operaciones y ver el reporte de la última planificación">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="1.5"/></svg><span>Cerrar operaciones</span>
+        </button>
+        <button class="btn solo-diario" id="btnReabrirOp" hidden title="Abrir una nueva operación desde la hora actual">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z"/></svg><span>Reabrir operaciones</span>
+        </button>
+        <button class="btn primario solo-sim" id="btnIniciar" title="Iniciar" aria-label="Iniciar">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z"/></svg><span>Iniciar</span>
         </button>
-        <button class="btn" id="btnDetener" disabled title="Detener" aria-label="Detener">
+        <button class="btn solo-sim" id="btnDetener" disabled title="Detener" aria-label="Detener">
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="6" width="3.5" height="12" rx="1"/><rect x="13.5" y="6" width="3.5" height="12" rx="1"/></svg><span>Detener</span>
         </button>
-        <button class="btn" id="btnReanudar" hidden title="Reanudar" aria-label="Reanudar">
+        <button class="btn solo-sim" id="btnReanudar" hidden title="Reanudar" aria-label="Reanudar">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z"/></svg><span>Reanudar</span>
         </button>
       </div>
     </div>
 
     <div class="tiempos" aria-live="off">
-      <span class="t-dato principal" title="Fecha y hora del momento que se está simulando"><span class="et" data-largo="Fecha y hora de simulación:" data-corto="Simulación:"></span> <b id="reloj">--/--/---- --:--:--</b></span>
-      <span class="t-dato" title="Tiempo simulado transcurrido desde el inicio de la simulación"><span class="et" data-largo="Duración de simulación:" data-corto="Duración:"></span> <b id="tSim">--:--:--</b></span>
-      <span class="t-dato" title="Fecha y hora actual (momento presente)"><span class="et" data-largo="Hoy:" data-corto="Hoy:"></span> <b id="tHoy">--/--/---- --:--:--</b></span>
-      <span class="t-dato" title="Tiempo real transcurrido desde que se inició la simulación"><span class="et" data-largo="Tiempo real:" data-corto="Real:"></span> <b id="tReal">00:00:00</b></span>
+      <span class="t-dato principal" id="tdReloj" title="Fecha y hora del momento que se está simulando"><span class="et" id="etReloj" data-largo="Fecha y hora de simulación:" data-corto="Simulación:"></span> <b id="reloj">--/--/---- --:--:--</b></span>
+      <span class="t-dato solo-sim" title="Tiempo simulado transcurrido desde el inicio de la simulación"><span class="et" data-largo="Duración de simulación:" data-corto="Duración:"></span> <b id="tSim">--:--:--</b></span>
+      <span class="t-dato solo-sim" title="Fecha y hora actual (momento presente)"><span class="et" data-largo="Hoy:" data-corto="Hoy:"></span> <b id="tHoy">--/--/---- --:--:--</b></span>
+      <span class="t-dato" id="tdReal" title="Tiempo real transcurrido desde que se inició la simulación"><span class="et" id="etReal" data-largo="Tiempo real:" data-corto="Real:"></span> <b id="tReal">00:00:00</b></span>
     </div>
 
     <div class="kpis">
@@ -298,7 +310,7 @@
         <div>
           <h2>Configuración</h2>
           <p class="nota">Los cambios se guardan en <code id="cfgArchivo">config.properties</code> y afectan a todos los navegadores conectados. Cada campo indica cuándo se aplica.</p>
-          <div class="config-leyenda"><span><i class="badge AHORA">Ahora</i>en la simulación en curso</span><span><i class="badge CICLO">Siguiente ciclo</i>en el siguiente ciclo de planificación</span><span><i class="badge INICIO">Al iniciar</i>al iniciar la próxima simulación</span></div>
+          <div class="config-leyenda"><span><i class="badge AHORA">Ahora</i>en la simulación y en la operación en curso</span><span><i class="badge CICLO">Siguiente ciclo</i>en el siguiente ciclo de planificación</span><span><i class="badge INICIO">Al iniciar</i>al iniciar la próxima simulación o al reabrir las operaciones</span></div>
         </div>
         <div class="config-acciones">
           <button class="btn" id="cfgRestaurar" type="button">Restaurar valores por defecto</button>
@@ -361,6 +373,48 @@
   <div class="modal-acciones">
     <button class="btn" id="cfgNo">Cancelar</button>
     <button class="btn primario" id="cfgSi">Guardar</button>
+  </div>
+</dialog>
+
+<!-- S13v1: registro de un pedido en la operación día a día (necesidad (i) de la situación auténtica) -->
+<dialog class="modal" id="modalPedido" aria-labelledby="pedTitulo">
+  <h2 id="pedTitulo">Registrar pedido</h2>
+  <p class="nota" id="pedMomento"></p>
+  <form id="formPedido" novalidate>
+    <div class="fila-campos">
+      <label class="campo"><span>X (km)</span><input id="pedX" type="number" min="0" step="1" required inputmode="numeric"></label>
+      <label class="campo"><span>Y (km)</span><input id="pedY" type="number" min="0" step="1" required inputmode="numeric"></label>
+      <button class="btn" type="button" id="pedEnMapa" title="Cierra este diálogo para elegir la esquina con un clic en el mapa">Elegir en el mapa</button>
+    </div>
+    <div class="fila-campos">
+      <label class="campo"><span>Cantidad de productos P</span><input id="pedCantidad" type="number" min="1" step="1" value="1" required inputmode="numeric"></label>
+      <label class="campo"><span>Plazo de entrega</span>
+        <select id="pedPlazo">
+          <option value="36">36 h · regular</option>
+          <option value="18">18 h · priorizado</option>
+          <option value="12">12 h · priorizado</option>
+          <option value="8">8 h · priorizado</option>
+          <option value="4">4 h · priorizado</option>
+        </select>
+      </label>
+      <label class="campo"><span>Cliente</span><input id="pedCliente" type="text" maxlength="20" placeholder="c9167" autocomplete="off"></label>
+    </div>
+    <p class="nota" id="pedEfecto"></p>
+    <p class="error-form" id="pedError" hidden></p>
+    <div class="modal-acciones">
+      <button class="btn" type="button" id="pedCancelar">Cancelar</button>
+      <button class="btn primario" type="submit" id="pedConfirmar">Registrar pedido</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- S13v1: confirmación para cerrar la operación día a día (rúbrica G09) -->
+<dialog class="modal" id="modalCerrarOp" aria-labelledby="cerrarOpTitulo">
+  <h2 id="cerrarOpTitulo">¿Cerrar las operaciones?</h2>
+  <p>La operación día a día se detiene para todos los navegadores y se muestra el reporte de la última planificación estable. Luego se puede reabrir desde la hora actual, con la flota en el almacén central.</p>
+  <div class="modal-acciones">
+    <button class="btn" id="cerrarOpNo">Cancelar</button>
+    <button class="btn peligro" id="cerrarOpSi">Cerrar operaciones</button>
   </div>
 </dialog>
 

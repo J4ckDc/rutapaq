@@ -6,14 +6,24 @@ import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.util.List;
 
-/** Fuente de pedidos y bloqueos a partir de los archivos de la carpeta datos/. */
+/**
+ * Fuente de pedidos y bloqueos a partir de los archivos de la carpeta datos/.
+ *
+ * S13v1: en la operación día a día no se leen los archivos de ventas (los pedidos solo llegan por el registro en
+ * línea); los bloqueos sí se leen de bloqueo.aamm.txt, porque son planificados con antelación (P&R 7).
+ */
 public final class FuenteDatos implements AutoCloseable {
-    private final LectorMensual<Formato.LineaPedido> pedidos;
+    private final LectorMensual<Formato.LineaPedido> pedidos;   // null: sin archivos de ventas (día a día)
     private final LectorMensual<Bloqueo> bloqueos;
 
     public FuenteDatos(Path carpeta, LocalDateTime inicio) {
+        this(carpeta, inicio, true);
+    }
+
+    /** S13v1: conVentas = false para la operación día a día. */
+    public FuenteDatos(Path carpeta, LocalDateTime inicio, boolean conVentas) {
         YearMonth m = YearMonth.from(inicio);
-        pedidos = new LectorMensual<>(carpeta, m, Formato::archivoVentas, Formato::pedido, Formato.LineaPedido::registro);
+        pedidos = conVentas ? new LectorMensual<>(carpeta, m, Formato::archivoVentas, Formato::pedido, Formato.LineaPedido::registro) : null;
         bloqueos = new LectorMensual<>(carpeta, m, Formato::archivoBloqueos, Formato::bloqueo, Bloqueo::inicio);
     }
 
@@ -39,7 +49,7 @@ public final class FuenteDatos implements AutoCloseable {
     }
 
     public List<Formato.LineaPedido> pedidosHasta(LocalDateTime t) throws IOException {
-        return pedidos.leerHasta(t);
+        return pedidos == null ? List.of() : pedidos.leerHasta(t);
     }
 
     public List<Bloqueo> bloqueosHasta(LocalDateTime t) throws IOException {
@@ -47,12 +57,12 @@ public final class FuenteDatos implements AutoCloseable {
     }
 
     public long lineasConError() {
-        return pedidos.errores() + bloqueos.errores();
+        return (pedidos == null ? 0 : pedidos.errores()) + bloqueos.errores();
     }
 
     @Override
     public void close() throws IOException {
-        pedidos.cerrar();
+        if (pedidos != null) pedidos.cerrar();
         bloqueos.cerrar();
     }
 }

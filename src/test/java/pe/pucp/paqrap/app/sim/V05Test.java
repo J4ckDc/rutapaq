@@ -96,15 +96,16 @@ class V05Test {
         assertEquals(d13.plusHours(48), plan.finMantenimiento("TA01", d13.plusHours(1)));
         assertTrue(plan.enMantenimiento("TB01", d13.plusHours(6).plusMinutes(59)), "bicicleta: hasta las 07:00");
         assertFalse(plan.enMantenimiento("TB01", d13.plusHours(7)));
-        assertTrue(plan.enMantenimiento("TM01", d13.plusHours(23)), "moto: 24 h por defecto");
-        assertFalse(plan.enMantenimiento("TM01", d13.plusHours(24)));
+        // S13v1: el tipo sin duración indicada usa el valor por defecto, 48 h (P&R 19, 03/11/2026)
+        assertTrue(plan.enMantenimiento("TM01", d13.plusHours(47)), "moto: 48 h por defecto");
+        assertFalse(plan.enMantenimiento("TM01", d13.plusHours(48)));
 
-        // por defecto (sin claves) son 24 h para todos, como en el archivo del profesor
+        // S13v1: por defecto (sin claves) son 48 h para todos los tipos (P&R 19, 03/11/2026)
         Config cfg = new Config(carpeta("").resolve("config.properties"));
         Map<TipoUnidad, Double> horas = Simulacion.horasMantenimiento(cfg);
-        for (TipoUnidad t : TipoUnidad.values()) assertEquals(24.0, horas.get(t), 1e-9);
-        Config cfg2 = new Config(carpeta("mantenimiento.horas.auto=48\n").resolve("config.properties"));
-        assertEquals(48.0, Simulacion.horasMantenimiento(cfg2).get(TipoUnidad.AUTO), 1e-9);
+        for (TipoUnidad t : TipoUnidad.values()) assertEquals(48.0, horas.get(t), 1e-9);
+        Config cfg2 = new Config(carpeta("mantenimiento.horas.auto=24\n").resolve("config.properties"));
+        assertEquals(24.0, Simulacion.horasMantenimiento(cfg2).get(TipoUnidad.AUTO), 1e-9);
     }
 
     @Test

@@ -1,4 +1,8 @@
-// RUTAPAQ v0.5.0 – visualizador del Simulador de rutas: simulación de 5 días y hasta el colapso, con averías de las unidades.
+// RUTAPAQ rutapaqS13v1 – visualizador: operación día a día (Tiempo real), simulación de 5 días y hasta el colapso, con
+// averías de las unidades.
+// S13v1: vista Tiempo real con la operación día a día, que el servidor mantiene siempre abierta a la hora actual de Lima;
+// se registran pedidos y averías en línea y se cierran las operaciones con el reporte de la última planificación (G09).
+// Cada navegador elige qué vista mira (Tiempo real o Simulador de rutas) sin afectar a los demás.
 // v0.5: semáforo + vacío, filtros globales, indicadores globales, pestañas Unidades y Almacenes, envíos con productos,
 // ícono orientado según el movimiento, zoom continuo y reporte de la última planificación estable.
 // Recibe el estado completo por SSE (/api/stream) cada ~500 ms y lo dibuja en un canvas.
@@ -31,6 +35,14 @@
   // aparece una nueva (iniciada aquí o en otro dispositivo); el usuario lo cambia para la próxima que inicie.
   let modo = 'SEMANAL';
   let escenarioVisto = '';
+  // S13v1: vista que mira este navegador: operación día a día (#tiempo-real) o Simulador de rutas
+  let vistaOp = location.hash === '#tiempo-real';
+  const esDiario = () => vistaOp;
+  const qVista = () => (vistaOp ? 'vista=operacion' : 'vista=simulacion');
+  /** S13v1: no hay simulación (o no hay operación) que mostrar. */
+  const sinEstado = () => !estado || estado.estado === 'SIN_SIMULACION' || estado.estado === 'SIN_OPERACION';
+  let eligiendoNodo = false;      // S13v1: el próximo clic en el mapa fija la ubicación del pedido que se registra
+  let pedidoPorElegir = null;     // S13v1: pedido recién registrado, para seleccionarlo cuando llegue en el estado
   let alertaColapso = null;     // alerta roja del colapso: no se cierra sola
   const vista = { zoom: 1, ox: 0, oy: 0 };
   // v0.5: zoom continuo (sin saltos): el mapa se acerca o aleja de a pocos hacia el objetivo
@@ -79,6 +91,8 @@
   const pedidosReplanificados = (n) => n === 1 ? 'su pedido se replanifica' : `sus ${n} pedidos se replanifican`;
   const ESTADOS_SIM = { SIN_SIMULACION: 'Sin simulación', PREPARADA: 'Preparando', EJECUTANDO: 'Simulando', PAUSADA: 'Detenido', TERMINADA: 'Finalizado',
     COLAPSO: 'Colapso' };
+  // S13v1: estados de la operación día a día
+  const ESTADOS_OP = { SIN_OPERACION: 'Sin operación', PREPARADA: 'Abriendo', EJECUTANDO: 'En operación', TERMINADA: 'Operaciones cerradas' };
   const esColapso = () => modo === 'COLAPSO';
 
   // ================================================================ tema claro / oscuro
@@ -545,21 +559,35 @@
 
   // ================================================================ barra superior y panel de indicadores
   function actualizarPaneles() {
-    const sinSim = !estado || estado.estado === 'SIN_SIMULACION';
-    let e = sinSim ? 'SIN_SIMULACION' : estado.estado;
+    const sinSim = sinEstado();
+    let e = sinSim ? (esDiario() ? 'SIN_OPERACION' : 'SIN_SIMULACION') : estado.estado;
     if (e === 'TERMINADA' && estado.tipoFin === 'COLAPSO') e = 'COLAPSO';   // v04: etiqueta "Colapso" en rojo
     const chip = $('estado');
-    chip.className = 'estado ' + e;
-    chip.querySelector('span').textContent = ESTADOS_SIM[e] || e;
-    chip.title = ESTADOS_SIM[e] || e;                 // en pantallas medianas solo se ve el punto de color
+    const nombres = esDiario() ? ESTADOS_OP : ESTADOS_SIM;
+    chip.className = 'estado ' + (e === 'SIN_OPERACION' ? 'SIN_SIMULACION' : e);
+    chip.querySelector('span').textContent = nombres[e] || e;
+    chip.title = nombres[e] || e;                     // en pantallas medianas solo se ve el punto de color
 
-    $('bloqueLinea').hidden = esColapso();           // v04: el colapso no tiene duración definida
+    $('bloqueLinea').hidden = esColapso() || esDiario();   // v04: el colapso no tiene duración definida; S13v1: ni el día a día
     $('btnDetener').disabled = e !== 'EJECUTANDO';
     $('btnDetener').hidden = e === 'PAUSADA';
     $('btnReanudar').hidden = e !== 'PAUSADA';
+    // S13v1: controles de la operación día a día
+    $('btnRegistrarPedido').disabled = !esDiario() || e !== 'EJECUTANDO';
+    $('btnCerrarOp').hidden = e !== 'EJECUTANDO' && e !== 'PREPARADA';
+    $('btnReabrirOp').hidden = !(e === 'TERMINADA' || e === 'SIN_OPERACION');
 
     const vacio = $('avisoVacio');
-    if (sinSim) {
+    if (esDiario()) {
+      // S13v1: la operación se abre sola con el servidor; solo se avisa si no se pudo abrir
+      if (sinSim && estado && estado.error) {
+        vacio.hidden = false;
+        vacio.innerHTML = `<b>No se pudo abrir la operación día a día</b><span>${esc(estado.error)}. Corrige la configuración y presiona <em>Reabrir operaciones</em>.</span>`;
+      } else if (sinSim) {
+        vacio.hidden = false;
+        vacio.innerHTML = '<div class="cargando"></div><b>Conectando con la operación día a día</b><span>El servidor la abre al arrancar, a la hora actual.</span>';
+      } else vacio.hidden = true;
+    } else if (sinSim) {
       vacio.hidden = false;
       vacio.innerHTML = esColapso()
         ? '<b>Simulación hasta el colapso</b><span>Elige la fecha y hora de inicio arriba y presiona <em>Iniciar</em>. Continúa hasta que un pedido no se entregue a tiempo.</span>'
@@ -620,7 +648,7 @@
   }
 
   function actualizarReloj() {
-    if (!estado || estado.estado === 'SIN_SIMULACION') {
+    if (sinEstado()) {
       $('reloj').textContent = '--/--/---- --:--:--';
       $('tSim').textContent = '--:--:--'; $('tReal').textContent = '00:00:00';
       $('tHoy').textContent = fmtFecha(new Date());
@@ -633,8 +661,10 @@
     $('reloj').textContent = fmtFecha(sim);
     const ini = fechaLocal(estado.inicio);          // v0.4.1: tiempo simulado transcurrido (rúbrica C13)
     $('tSim').textContent = sim && ini ? fmtDur(Math.max(0, (sim - ini) / 1000)) : '--:--:--';
-    if ($('modalAveria').open) $('avMomento').textContent = `La avería ocurre en el instante actual de la simulación: ${fmtFecha(sim)}.`;
-    $('tReal').textContent = fmtDur(estado.segundosReales + dt);
+    if ($('modalAveria').open) $('avMomento').textContent = `La avería ocurre en el instante actual de la ${esDiario() ? 'operación' : 'simulación'}: ${fmtFecha(sim)}.`;
+    if ($('modalPedido').open) $('pedMomento').textContent = `El pedido se registra ahora: ${fmtFecha(sim)}. Su plazo se cuenta desde este momento.`;
+    // S13v1: en el día a día el reloj es la hora actual y el tiempo de operación es el transcurrido desde que se abrió
+    $('tReal').textContent = esDiario() && sim && ini ? fmtDur(Math.max(0, (sim - ini) / 1000)) : fmtDur(estado.segundosReales + dt);
     $('tHoy').textContent = fmtFecha(new Date());
   }
 
@@ -699,7 +729,7 @@
     });
     for (const [id, li] of elementosPedido) if (!vistos.has(id)) { li.remove(); elementosPedido.delete(id); }
     let extra = '';
-    if (!lista.length) extra = estado && estado.pedidos ? (uf ? `${uf} no tiene pedidos asignados en este momento.` : q ? 'Ningún pedido en curso coincide con la búsqueda.' : 'No hay pedidos en curso.') : '';
+    if (!lista.length) extra = estado && estado.pedidos ? (uf ? `${uf} no tiene pedidos asignados en este momento.` : q ? 'Ningún pedido en curso coincide con la búsqueda.' : esDiario() && estado.estado === 'EJECUTANDO' ? 'No hay pedidos en curso. Regístralos con el botón Registrar pedido.' : 'No hay pedidos en curso.') : '';
     else if (lista.length > MAX) extra = `y ${num(lista.length - MAX)} más; usa el buscador para encontrarlos`;
     liExtra.className = lista.length ? 'mas' : 'lista-vacia';
     liExtra.textContent = extra;
@@ -993,7 +1023,7 @@
       terminadas.forEach((a) => filas.push({ clave: a.id, clase: 'averia fin t' + a.tipo, unidad: a.unidad, html: htmlAveria(a) }));
     }
     if (!todas.length) filas.push({ clave: 'nada', clase: 'lista-vacia', html: estado && estado.unidades
-      ? 'Sin averías por ahora. Regístralas con el botón Registrar avería.' : 'Inicia una simulación para registrar averías.' });
+      ? 'Sin averías por ahora. Regístralas con el botón Registrar avería.' : esDiario() ? 'Las operaciones están cerradas.' : 'Inicia una simulación para registrar averías.' });
 
     const ul = $('listaAverias');
     const vistos = new Set();
@@ -1024,7 +1054,10 @@
   let cfgAveria = { tipo1Horas: 2, enLugarHoras: 4, tipo3Dias: 2, tipo3Hora: '15:00', trasvaseMin: 30 };
   const propias = new Set();       // averías registradas desde este navegador (su aviso ya se mostró)
   function abrirRegistroAveria(preferida) {
-    if (!estado || !(estado.estado === 'EJECUTANDO' || estado.estado === 'PAUSADA')) { avisar('Inicia una simulación para registrar averías.', 'alerta'); return; }
+    if (!estado || !(estado.estado === 'EJECUTANDO' || estado.estado === 'PAUSADA')) {
+      avisar(esDiario() ? 'Las operaciones están cerradas: reábrelas para registrar averías.' : 'Inicia una simulación para registrar averías.', 'alerta');
+      return;
+    }
     const orden = { EN_RUTA: 0, ENTREGANDO: 1, TRASVASE: 2, REFRIGERIO: 3, DISPONIBLE: 4 };
     const opciones = estado.unidades.filter((u) => !u.averia && u.estado !== 'MANTENIMIENTO')
       .sort((a, b) => ((orden[a.estado] ?? 9) - (orden[b.estado] ?? 9)) || a.id.localeCompare(b.id));
@@ -1060,7 +1093,7 @@
     if (!unidad) return;
     $('avConfirmar').disabled = true;
     try {
-      const r = await post(`/api/averias?unidad=${encodeURIComponent(unidad)}&tipo=${tipo}`);
+      const r = await post(`/api/averias?unidad=${encodeURIComponent(unidad)}&tipo=${tipo}&${qVista()}`);
       const av = r.averia;
       propias.add(av.id);
       $('modalAveria').close();
@@ -1172,6 +1205,15 @@
       if (arrastre.movio) { vista.ox = arrastre.ox + dx; vista.oy = arrastre.oy + dy; sucio = true; }
       return;
     }
+    if (eligiendoNodo) {                       // S13v1: ubicación del pedido que se registra
+      const [nx, ny] = nodoEn(px, py);
+      const tt = $('tooltip');
+      tt.innerHTML = `<b>Cliente en (${nx}, ${ny})</b><br><span>Clic para elegir esta esquina</span>`;
+      tt.hidden = false;
+      tt.style.left = Math.min(px + 14, r.width - tt.offsetWidth - 8) + 'px';
+      tt.style.top = Math.min(py + 14, r.height - tt.offsetHeight - 8) + 'px';
+      return;
+    }
     const o = objetoEn(px, py);
     const tt = $('tooltip');
     if (!o) { tt.hidden = true; cv.style.cursor = ''; return; }
@@ -1184,6 +1226,12 @@
   });
   cv.addEventListener('pointerup', (e) => {
     const r = cv.getBoundingClientRect();
+    if (arrastre && !arrastre.movio && eligiendoNodo) {   // S13v1
+      arrastre = null;
+      $('tooltip').hidden = true;
+      elegirNodo(e.clientX - r.left, e.clientY - r.top);
+      return;
+    }
     if (arrastre && !arrastre.movio) {
       const o = objetoEn(e.clientX - r.left, e.clientY - r.top);
       if (!o) { if (!enfoque()) seleccionar(null); }          // en enfoque, un clic en el vacío no lo quita
@@ -1282,7 +1330,7 @@
   }
 
   function revisarEventos(prev) {
-    if (!estado || estado.estado === 'SIN_SIMULACION') return;
+    if (sinEstado()) return;
     const clave = estado.escenario + estado.inicio;
     if (prev && prev.estado !== estado.estado) {
       if (estado.estado === 'PAUSADA') avisar('Simulación detenida. Presiona Reanudar para continuar desde este instante.', 'alerta');
@@ -1298,15 +1346,19 @@
     if (estado.estado === 'TERMINADA' && finMostrado !== clave) {
       finMostrado = clave;
       if (estado.tipoFin === 'COLAPSO') avisarColapso();                                   // v04
-      else if (estado.tipoFin === 'FIN_PERIODO' || estado.tipoFin === 'SIN_COLAPSO') mostrarResumenFinal();
+      else if (estado.tipoFin === 'FIN_PERIODO' || estado.tipoFin === 'SIN_COLAPSO' || estado.tipoFin === 'CIERRE') mostrarResumenFinal();
       else avisar(estado.motivoFin, 'alerta');
     }
   }
 
   function mostrarResumenFinal() {
     const ini = fechaLocal(estado.inicio), fin = fechaLocal(estado.hora);
-    $('finTitulo').textContent = estado.tipoFin === 'SIN_COLAPSO' ? 'Simulación hasta el colapso terminada sin colapso' : 'Simulación de 5 días terminada';
-    $('finPeriodo').textContent = `Del ${fmtFecha(ini)} al ${fmtFecha(fin)} · duró ${fmtDur(estado.segundosReales)} en tiempo real · algoritmo ${estado.algoritmo}`;
+    $('finTitulo').textContent = estado.tipoFin === 'CIERRE' ? 'Operaciones día a día cerradas'      // S13v1 (G09)
+      : estado.tipoFin === 'SIN_COLAPSO' ? 'Simulación hasta el colapso terminada sin colapso' : 'Simulación de 5 días terminada';
+    $('finPeriodo').textContent = estado.tipoFin === 'CIERRE'
+      ? `Operación del ${fmtFecha(ini)} al ${fmtFecha(fin)} · ${fmtDur(Math.max(0, (fin - ini) / 1000))} de operación · algoritmo ${estado.algoritmo}`
+      : `Del ${fmtFecha(ini)} al ${fmtFecha(fin)} · duró ${fmtDur(estado.segundosReales)} en tiempo real · algoritmo ${estado.algoritmo}`;
+    $('finNueva').textContent = esDiario() ? 'Reabrir operaciones' : 'Nueva simulación';
     const fc = $('finColapso');
     fc.hidden = estado.tipoFin !== 'SIN_COLAPSO';
     fc.innerHTML = fc.hidden ? '' : `<p class="colapso-motivo ok">${esc(estado.motivoFin)}.</p>`;
@@ -1390,6 +1442,8 @@
       [num(estado.ciclos), 'Ciclos de planificación'],
       [num(estado.msMaximoPlan) + ' ms', 'Ta máximo (tiempo de ejecución del planificador)'],
       [`${num(estado.scMin)} min · ${Number(estado.saSeg).toLocaleString('es-PE', { maximumFractionDigits: 1 })} s`, 'Sc (salto de consumo) · Sa (salto del algoritmo)'],
+      // S13v1 (G07): el planificador considera los bloqueos vigentes y los que empiezan dentro de esta anticipación
+      [estado.anticipacionBloqueosHoras > 0 ? `${num(estado.anticipacionBloqueosHoras)} h` : 'Solo vigentes', 'Bloqueos considerados con anticipación (planificador)'],
       [num(r.averias), 'Averías (tipo 1, 2 y 3)'],
       [num(r.trasvasados), 'Paquetes trasvasados'],
       [num(r.devueltos), 'Devueltos al central'],
@@ -1401,7 +1455,7 @@
     const c = estado && estado.colapso;   // v04: al volver al mapa tras el colapso, queda elegido el pedido involucrado
     if (c && c.pedido && estado.estado === 'TERMINADA') seleccionar({ tipo: 'pedido', id: c.pedido.id }, true);
   };
-  $('finNueva').onclick = () => { $('modalFin').close(); $('fecha').focus(); };
+  $('finNueva').onclick = () => { $('modalFin').close(); if (esDiario()) reabrirOperacion(); else $('fecha').focus(); };
 
   // ================================================================ controles de la simulación
   async function post(url) {
@@ -1458,6 +1512,7 @@
   function cargarConfigCliente() {
     return fetch('/api/config').then((r) => r.json()).then((c) => {
       configVersionVista = c.configVersion;
+      if (c.diario) cfgDiario = c.diario;          // S13v1
       if (!$('fecha').value) $('fecha').value = `${c.fechaInicio}T${c.horaInicio || '00:00'}`;
       if (!(estado && estado.mapa)) fijarMapa(c.mapa);   // v0.5 (B01): sin simulación, el mapa configurado
       if (c.semaforo) aplicarUmbrales(c.semaforo);   // v0.5: todas las leyendas del semáforo según la configuración
@@ -1471,16 +1526,20 @@
   cargarConfigCliente();
 
   // ================================================================ conexión con el servidor (SSE)
+  let fuenteSse = null;
   function conectar() {
-    const es = new EventSource('/api/stream');
+    if (fuenteSse) fuenteSse.close();
+    const es = new EventSource('/api/stream?' + qVista());   // S13v1: cada vista tiene su propio estado
+    fuenteSse = es;
     es.onmessage = (m) => {
+      if (es !== fuenteSse) return;                 // S13v1: llegó tarde, de la vista anterior
       const prev = estado;
       const ahora = performance.now();
       if (recibidoEn) intervalo = Math.max(200, Math.min(1500, ahora - recibidoEn));
       anterior = estado;
       estado = JSON.parse(m.data);
       if (estado.unidades) prepararAnimacion(); else anim.clear();
-      if (estado.escenario && estado.estado !== 'SIN_SIMULACION' && estado.escenario + estado.inicio !== escenarioVisto) {
+      if (!esDiario() && estado.escenario && estado.estado !== 'SIN_SIMULACION' && estado.escenario + estado.inicio !== escenarioVisto) {
         escenarioVisto = estado.escenario + estado.inicio;   // v04: una simulación nueva fija el modo mostrado
         if (estado.escenario === 'COLAPSO' || estado.escenario === 'SEMANAL') elegirModo(estado.escenario);
         // v0.5: la fecha y hora de inicio también siguen a la simulación en curso (al abrir la página, en otra pestaña
@@ -1498,6 +1557,12 @@
       actualizarPaneles();
       actualizarListas();
       actualizarDialogoAveria();
+      if (pedidoPorElegir && estado.pedidos && estado.pedidos.some((p) => p.id === pedidoPorElegir)) {   // S13v1
+        const id = pedidoPorElegir;
+        pedidoPorElegir = null;
+        quitarFiltroUnidad();
+        seleccionar({ tipo: 'pedido', id }, true);
+      }
       mostrarDetalle();
       revisarEventos(prev);
       sucio = true;
@@ -1629,7 +1694,7 @@
     let vacia = ul.querySelector('.lista-vacia');
     if (!lista.length) {
       if (!vacia) { vacia = document.createElement('li'); vacia.className = 'lista-vacia'; ul.appendChild(vacia); }
-      vacia.textContent = estado && estado.unidades ? 'Ninguna unidad coincide con los filtros o la búsqueda.' : 'Inicia una simulación para ver las unidades.';
+      vacia.textContent = estado && estado.unidades ? 'Ninguna unidad coincide con los filtros o la búsqueda.' : esDiario() ? 'Conectando con la operación día a día…' : 'Inicia una simulación para ver las unidades.';
     } else if (vacia) vacia.remove();
   }
   function htmlUnidad(u, i) {
@@ -1671,7 +1736,7 @@
   function actualizarListaAlmacenesDer() {
     if (pestana !== 'almacenes') return;
     const ul = $('listaAlmacenesDer');
-    if (!estado || !estado.almacenes) { ul.innerHTML = '<li class="lista-vacia">Inicia una simulación para ver los almacenes.</li>'; ul._html = ''; return; }
+    if (!estado || !estado.almacenes) { ul.innerHTML = `<li class="lista-vacia">${esDiario() ? 'Conectando con la operación día a día…' : 'Inicia una simulación para ver los almacenes.'}</li>`; ul._html = ''; return; }
     const q = $('buscar').value.trim().toLowerCase();
     const coincide = (e) => !q || e.pedido.toLowerCase().includes(q) || e.u.toLowerCase().includes(q) || (e.cli || '').toLowerCase().includes(q);
     const h = Math.round(estado.ventanaHoras || 4);
@@ -1687,10 +1752,20 @@
         return `<details data-k="${a.id}:${k}"${abiertos.has(a.id + ':' + k) ? ' open' : ''}><summary><span>${titulo}</span><b>${num(datos.envios)} envíos · ${num(datos.paquetes)} paq.</b></summary><ul class="alm-lista">${filas}</ul></details>`;
       };
       const envio = (extra) => (e) => `<li><b>${e.pedido}</b> · ${e.u} · ${e.q} paq. <code>${rango(e.pedido, e.p0, e.p1)}</code> → (${e.x}, ${e.y}) · ${extra(e)}</li>`;
+      // S13v1 (E20): lo que viene en camino al almacén: unidades que llegan a recargar y los paquetes que traen
+      const llegan = () => {
+        const d = a.llegan || { unidades: 0, paquetes: 0, lista: [] };
+        const lista = d.lista.filter((e) => !q || e.u.toLowerCase().includes(q));
+        const filas = lista.length ? lista.map((e) => `<li><b>${e.u}</b> · llega ${horaSim(e.ll)} · trae ${num(e.trae)} paq. · recarga ${num(e.recarga)} paq.</li>`).join('')
+            + (d.unidades > d.lista.length ? `<li class="vacia">y ${num(d.unidades - d.lista.length)} llegadas más</li>` : '')
+          : `<li class="vacia">${q ? 'Ninguna coincide con la búsqueda.' : 'Ninguna.'}</li>`;
+        return `<details data-k="${a.id}:llegan"${abiertos.has(a.id + ':llegan') ? ' open' : ''}><summary><span>En camino al almacén</span><b>${num(d.unidades)} ${d.unidades === 1 ? 'unidad' : 'unidades'} · ${num(d.paquetes)} paq.</b></summary><ul class="alm-lista">${filas}</ul></details>`;
+      };
       return `<li class="alm-card${elegido ? ' sel' : ''}" data-id="${a.id}">
         <div class="alm-cab" title="Ver en el mapa">${icono}<span>${esc(a.nombre)}</span>${stock}</div>
         <div class="sub">${sub} · a bordo de unidades: ${num(a.aBordo)} paq. · vienen a recargar: ${a.recargan.length}</div>
-        ${seccion('transito', 'En tránsito', a.transito, envio((e) => `llega ${horaSim(e.ll)}`))}
+        ${llegan()}
+        ${seccion('transito', 'En tránsito (salieron de aquí)', a.transito, envio((e) => `llega ${horaSim(e.ll)}`))}
         ${seccion('porSalir', `Salen en las próximas ${h} h`, a.porSalir, envio((e) => `sale ${horaSim(e.sal)} · llega ${horaSim(e.ll)}`))}
         ${seccion('entregados', `Entregados en las últimas ${h} h`, a.entregados, envio((e) => `entregado ${horaSim(e.hora)}`))}
       </li>`;
@@ -1766,9 +1841,9 @@
     sec.hidden = false;
     sec.innerHTML = '<h3>Última planificación estable</h3><p class="nota">Cargando…</p>';
     try {
-      const r = await (await fetch('/api/plan')).json();
+      const r = await (await fetch('/api/plan?' + qVista())).json();
       planReporte = r.plan;
-      if (!planReporte) { sec.innerHTML = '<h3>Última planificación estable</h3><p class="nota">No se llegó a calcular ninguna planificación en este escenario.</p>'; return; }
+      if (!planReporte) { sec.innerHTML = `<h3>Última planificación estable</h3><p class="nota">${esDiario() ? 'No hubo pedidos que planificar durante esta operación.' : 'No se llegó a calcular ninguna planificación en este escenario.'}</p>`; return; }
       const porUnidad = new Map();
       for (const f of planReporte.filas) { if (!porUnidad.has(f.unidad)) porUnidad.set(f.unidad, []); porUnidad.get(f.unidad).push(f); }
       const sinParadas = estado.unidades.filter((u) => !porUnidad.has(u.id)).map((u) => u.id);
@@ -1780,7 +1855,7 @@
       }).join('');
       sec.innerHTML = `<h3>Última planificación estable</h3>
         <p class="nota">Plan calculado el ${esc(fmtFecha(fechaLocal(planReporte.hora)))} (ciclo ${planReporte.ciclo}, ${esc(planReporte.algoritmo)}): itinerario de cada unidad con la hora estimada de llegada y salida de cada parada${planReporte.sinAsignar ? ` · ${planReporte.sinAsignar} partes de pedidos quedaron sin asignar en ese ciclo` : ''}.</p>
-        <div class="acciones-plan"><a class="btn" href="/api/plan.csv" download="ultima-planificacion.csv">Descargar CSV</a><button class="btn" type="button" id="imprimirPlan">Imprimir</button></div>
+        <div class="acciones-plan"><a class="btn" href="/api/plan.csv?${qVista()}" download="${esDiario() ? 'ultima-planificacion-dia-a-dia.csv' : 'ultima-planificacion.csv'}">Descargar CSV</a><button class="btn" type="button" id="imprimirPlan">Imprimir</button></div>
         <div class="lista-plan">${unidades || '<p class="nota">Ninguna unidad tenía paradas.</p>'}</div>
         ${sinParadas.length ? `<p class="nota">Sin paradas en ese plan: ${sinParadas.join(', ')}.</p>` : ''}`;
       $('imprimirPlan').onclick = imprimirPlan;
@@ -1796,7 +1871,7 @@
     const filas = planReporte.filas.map((f) => `<tr><td>${f.unidad}</td><td>${f.orden}</td><td>${TIPO_PARADA[f.tipo] || f.tipo}</td><td>${esc(f.ref)}</td><td>${esc(f.cliente)}</td><td>(${f.x}, ${f.y})</td><td>${f.cantidad || ''}</td><td>${esc(f.productos)}</td><td>${fmtCorta(f.llegada)}</td><td>${fmtCorta(f.salida)}</td></tr>`).join('');
     w.document.write(`<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Última planificación estable</title>
       <style>body{font:12px system-ui,sans-serif;margin:20px}h1{font-size:16px;margin:0 0 4px}p{color:#555;margin:0 0 12px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:3px 5px;text-align:left}th{background:#f1f5f9}</style></head>
-      <body><h1>RUTAPAQ · Última planificación estable</h1><p>Plan del ${esc(fmtFecha(fechaLocal(planReporte.hora)))} · ciclo ${planReporte.ciclo} · ${esc(planReporte.algoritmo)} · escenario ${planReporte.escenario === 'COLAPSO' ? 'hasta el colapso' : 'simulación de 5 días'}</p>
+      <body><h1>RUTAPAQ · Última planificación estable</h1><p>Plan del ${esc(fmtFecha(fechaLocal(planReporte.hora)))} · ciclo ${planReporte.ciclo} · ${esc(planReporte.algoritmo)} · escenario ${planReporte.escenario === 'COLAPSO' ? 'hasta el colapso' : planReporte.escenario === 'DIA_A_DIA' ? 'operación día a día' : 'simulación de 5 días'}</p>
       <table><thead><tr><th>Unidad</th><th>#</th><th>Parada</th><th>Referencia</th><th>Cliente</th><th>Destino</th><th>Cant.</th><th>Productos</th><th>Llega</th><th>Sale</th></tr></thead><tbody>${filas}</tbody></table></body></html>`);
     w.document.close();
     w.focus();
@@ -1809,22 +1884,164 @@
   let cfgGuardando = false;
   const BADGE = { AHORA: 'Ahora', CICLO: 'Siguiente ciclo', INICIO: 'Al iniciar' };
   const camposCfg = () => (cfgDatos ? cfgDatos.secciones.flatMap((s) => s.campos) : []);
+  /** S13v1: marca en el menú la sección activa (Tiempo real, Simulador de rutas o Configuración). */
+  function marcarNav(id) {
+    for (const n of ['navTiempoReal', 'navSimulador', 'navConfig']) {
+      $(n).classList.toggle('activo', n === id);
+      if (n === id) $(n).setAttribute('aria-current', 'page'); else $(n).removeAttribute('aria-current');
+    }
+  }
   function abrirConfig() {
-    $('navSimulador').classList.remove('activo'); $('navSimulador').removeAttribute('aria-current');
-    $('navConfig').classList.add('activo'); $('navConfig').setAttribute('aria-current', 'page');
+    marcarNav('navConfig');
     $('vistaConfig').hidden = false;
     cargarConfig();
   }
+  /** Cierra la pantalla Configuración; devuelve false si el usuario decide quedarse (cambios sin guardar). */
   function cerrarConfig() {
-    if (hayCambiosCfg() && !window.confirm('Hay cambios sin guardar en la configuración. ¿Salir sin guardarlos?')) return;
-    $('navConfig').classList.remove('activo'); $('navConfig').removeAttribute('aria-current');
-    $('navSimulador').classList.add('activo'); $('navSimulador').setAttribute('aria-current', 'page');
+    if (hayCambiosCfg() && !window.confirm('Hay cambios sin guardar en la configuración. ¿Salir sin guardarlos?')) return false;
+    marcarNav(esDiario() ? 'navTiempoReal' : 'navSimulador');
     $('vistaConfig').hidden = true;
     sucio = true;
+    return true;
   }
   $('navConfig').onclick = abrirConfig;
-  $('navSimulador').onclick = () => { if (!$('vistaConfig').hidden) cerrarConfig(); };
+  $('navSimulador').onclick = () => cambiarVista(false);
+  $('navTiempoReal').onclick = () => cambiarVista(true);
   $('cfgCerrar').onclick = cerrarConfig;
+
+  // ================================================================ S13v1: vista Tiempo real (operación día a día)
+  /** Etiquetas de la barra superior y textos según la vista (mismo diseño; en Tiempo real, 2 tiempos). */
+  function aplicarVista() {
+    $('app').classList.toggle('modo-diario', vistaOp);
+    marcarNav(!$('vistaConfig').hidden ? 'navConfig' : vistaOp ? 'navTiempoReal' : 'navSimulador');
+    const et = $('etReloj'), er = $('etReal');
+    if (vistaOp) {
+      et.dataset.largo = 'Fecha y hora actual:'; et.dataset.corto = 'Ahora:';
+      $('tdReloj').title = 'Fecha y hora actual (Lima): la operación día a día corre en tiempo real';
+      er.dataset.largo = 'Tiempo de operación:'; er.dataset.corto = 'Operación:';
+      $('tdReal').title = 'Tiempo transcurrido desde que se abrieron las operaciones';
+    } else {
+      et.dataset.largo = 'Fecha y hora de simulación:'; et.dataset.corto = 'Simulación:';
+      $('tdReloj').title = 'Fecha y hora del momento que se está simulando';
+      er.dataset.largo = 'Tiempo real:'; er.dataset.corto = 'Real:';
+      $('tdReal').title = 'Tiempo real transcurrido desde que se inició la simulación';
+    }
+    $('cfgCerrar').textContent = vistaOp ? 'Volver a Tiempo real' : 'Volver al simulador';
+    document.title = vistaOp ? 'RUTAPAQ – Tiempo real' : 'RUTAPAQ – Simulador de rutas';
+  }
+  /** Cambia entre Tiempo real y el Simulador de rutas. Solo cambia lo que ve este navegador. */
+  function cambiarVista(op) {
+    if (!$('vistaConfig').hidden && !cerrarConfig()) return;
+    if (op === vistaOp) return;
+    vistaOp = op;
+    history.replaceState(null, '', op ? '#tiempo-real' : location.pathname + location.search);
+    for (const d of ['modalFin', 'modalAveria', 'modalPedido', 'modalCerrarOp', 'modalConfirmar']) if ($(d).open) $(d).close();
+    if (alertaColapso) { alertaColapso.remove(); alertaColapso = null; }
+    terminarEleccionNodo();
+    estado = null; anterior = null; anim.clear(); sel = null; pedidoPorElegir = null; finMostrado = '';
+    zoomAnim.activo = false; vista.zoom = 1; vista.ox = 0; vista.oy = 0;   // la otra vista empieza con la ciudad completa
+    $('buscar').value = ''; botonLimpiar();
+    aplicarVista();
+    actualizarPaneles();
+    actualizarListas();
+    mostrarDetalle();
+    sucio = true;
+    conectar();
+  }
+  window.addEventListener('hashchange', () => cambiarVista(location.hash === '#tiempo-real'));
+
+  // ---- registrar pedido
+  let mapaPedido = { ancho: ANCHO, alto: ALTO };
+  function abrirRegistroPedido() {
+    if (!esDiario() || !estado || estado.estado !== 'EJECUTANDO') { avisar('Las operaciones están cerradas: reábrelas para registrar pedidos.', 'alerta'); return; }
+    mapaPedido = { ancho: ANCHO, alto: ALTO };
+    $('pedX').max = ANCHO; $('pedY').max = ALTO;
+    $('pedError').hidden = true;
+    for (const id of ['pedX', 'pedY', 'pedCantidad', 'pedCliente']) $(id).classList.remove('invalido');
+    actualizarEfectoPedido();
+    actualizarReloj();
+    $('modalPedido').showModal();
+    ($('pedX').value === '' ? $('pedX') : $('pedCantidad')).focus();
+  }
+  function actualizarEfectoPedido() {
+    const plazo = Number($('pedPlazo').value);
+    const lim = estado && fechaLocal(estado.hora) ? new Date(fechaLocal(estado.hora).getTime() + plazo * 3600000) : null;
+    $('pedEfecto').textContent = `Debe entregarse a más tardar el ${fmtFecha(lim)} (${plazo} h). Se replanifica de inmediato, `
+      + `además de la planificación programada cada ${num(cfgDiario.saMinutos)} min.`;
+  }
+  let cfgDiario = { saMinutos: 5, cantidadMaxima: 9999 };
+  $('pedPlazo').addEventListener('change', actualizarEfectoPedido);
+  $('btnRegistrarPedido').onclick = abrirRegistroPedido;
+  $('pedCancelar').onclick = () => $('modalPedido').close();
+  $('pedEnMapa').onclick = () => {
+    $('modalPedido').close();
+    eligiendoNodo = true;
+    cv.classList.add('eligiendo');
+    avisar('Haz clic en el mapa en la esquina del cliente (Esc para cancelar).');
+  };
+  function terminarEleccionNodo() {
+    eligiendoNodo = false;
+    cv.classList.remove('eligiendo');
+  }
+  /** Esquina (nodo) más cercana a un punto de la pantalla, dentro del mapa. */
+  function nodoEn(px, py) {
+    const [x, y] = aMundo(px, py);
+    return [Math.max(0, Math.min(ANCHO, Math.round(x))), Math.max(0, Math.min(ALTO, Math.round(y)))];
+  }
+  function elegirNodo(px, py) {
+    const [x, y] = nodoEn(px, py);
+    terminarEleccionNodo();
+    $('pedX').value = x; $('pedY').value = y;
+    abrirRegistroPedido();
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && eligiendoNodo) { terminarEleccionNodo(); $('tooltip').hidden = true; abrirRegistroPedido(); }
+  });
+  $('formPedido').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const x = $('pedX').value.trim(), y = $('pedY').value.trim(), q = $('pedCantidad').value.trim();
+    const cliente = $('pedCliente').value.trim(), plazo = $('pedPlazo').value;
+    const errores = [];
+    const entero = (v, min, max) => /^\d+$/.test(v) && Number(v) >= min && Number(v) <= max;
+    $('pedX').classList.toggle('invalido', !entero(x, 0, mapaPedido.ancho));
+    $('pedY').classList.toggle('invalido', !entero(y, 0, mapaPedido.alto));
+    $('pedCantidad').classList.toggle('invalido', !entero(q, 1, cfgDiario.cantidadMaxima));
+    $('pedCliente').classList.toggle('invalido', !!cliente && !/^[A-Za-z0-9_-]{1,20}$/.test(cliente));
+    if (!entero(x, 0, mapaPedido.ancho) || !entero(y, 0, mapaPedido.alto)) errores.push(`la ubicación debe ser una esquina del mapa (x de 0 a ${mapaPedido.ancho}, y de 0 a ${mapaPedido.alto})`);
+    if (!entero(q, 1, cfgDiario.cantidadMaxima)) errores.push('la cantidad debe ser un número entero mayor que 0');
+    if (cliente && !/^[A-Za-z0-9_-]{1,20}$/.test(cliente)) errores.push('el cliente solo puede tener letras, números, guiones y guiones bajos');
+    if (errores.length) { $('pedError').textContent = 'Revisa los datos: ' + errores.join('; ') + '.'; $('pedError').hidden = false; return; }
+    $('pedConfirmar').disabled = true;
+    try {
+      const params = new URLSearchParams({ x, y, cantidad: q, plazo, cliente });
+      const r = await post('/api/pedidos?vista=operacion&' + params.toString());
+      $('modalPedido').close();
+      avisar(`Pedido ${r.id} registrado: ${q} ${Number(q) === 1 ? 'producto' : 'productos'} para ${cliente || 'c-web'} en (${x}, ${y}), plazo ${plazo} h. Se replanifica de inmediato.`);
+      pedidoPorElegir = r.id;
+      $('pedX').value = ''; $('pedY').value = ''; $('pedCantidad').value = '1';
+    } catch (e) {
+      $('pedError').textContent = 'No se pudo registrar: ' + e.message;
+      $('pedError').hidden = false;
+    } finally {
+      $('pedConfirmar').disabled = false;
+    }
+  });
+
+  // ---- cerrar y reabrir las operaciones (G09)
+  $('btnCerrarOp').onclick = () => $('modalCerrarOp').showModal();
+  $('cerrarOpNo').onclick = () => $('modalCerrarOp').close();
+  $('cerrarOpSi').onclick = async () => {
+    $('modalCerrarOp').close();
+    try { await post('/api/operacion/cerrar'); } catch (e) { avisar('No se pudo cerrar: ' + e.message, 'error'); }
+  };
+  async function reabrirOperacion() {
+    try {
+      await post('/api/operacion/reabrir');
+      sel = null; anterior = null; anim.clear(); finMostrado = '';
+      avisar('Operaciones reabiertas desde la hora actual: la flota parte del almacén central.');
+    } catch (e) { avisar('No se pudo reabrir: ' + e.message, 'error'); }
+  }
+  $('btnReabrirOp').onclick = reabrirOperacion;
 
   async function cargarConfig() {
     try {
@@ -1918,10 +2135,10 @@
     const grupos = { AHORA: [], CICLO: [], INICIO: [] };
     for (const k of claves) { const c = porClave.get(k); if (c) grupos[c.aplica].push((c.grupo || seccionDe.get(k)) + ' · ' + c.etiqueta); }
     const textos = enCurso
-      ? { AHORA: 'Se aplican ahora en la simulación en curso', CICLO: 'Se aplican en el siguiente ciclo de planificación', INICIO: 'Se aplican al iniciar la próxima simulación' }
-      : { AHORA: 'Se aplican de inmediato', CICLO: 'Se aplican de inmediato', INICIO: 'Se aplican al iniciar la próxima simulación' };
+      ? { AHORA: 'Se aplican ahora en la simulación y en la operación en curso', CICLO: 'Se aplican en el siguiente ciclo de planificación', INICIO: 'Se aplican al iniciar la próxima simulación o al reabrir las operaciones' }
+      : { AHORA: 'Se aplican de inmediato', CICLO: 'Se aplican de inmediato', INICIO: 'Se aplican al iniciar la próxima simulación o al reabrir las operaciones' };
     $('cfgConfTitulo').textContent = titulo;
-    $('cfgResumen').innerHTML = `<p>Se guardará en <code>config.properties</code>. ${enCurso ? 'Hay una simulación en curso: el cambio afecta a todos los navegadores que la están viendo.' : 'Afecta a todos los navegadores conectados.'}</p>`
+    $('cfgResumen').innerHTML = `<p>Se guardará en <code>config.properties</code>. ${enCurso ? 'Hay una simulación u operación en curso: el cambio afecta a todos los navegadores que la están viendo.' : 'Afecta a todos los navegadores conectados.'}</p>`
       + Object.entries(grupos).filter(([, l]) => l.length).map(([a, l]) => `<h4><i class="badge ${a}">${BADGE[a]}</i>${textos[a]}</h4><ul>${l.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`).join('');
     $('cfgSi').textContent = boton;
     accionCfg = accion;
@@ -1959,7 +2176,7 @@
       const partes = [];
       if (j.ahora.length) partes.push(`ahora: ${j.ahora.length}`);
       if (j.ciclo.length) partes.push(`en el siguiente ciclo: ${j.ciclo.length}`);
-      if (j.inicio.length) partes.push(`al iniciar la próxima simulación: ${j.inicio.length}`);
+      if (j.inicio.length) partes.push(`al iniciar la próxima simulación o reabrir las operaciones: ${j.inicio.length}`);
       avisar(j.cambios ? `Configuración guardada (${partes.join(' · ')}).` : 'No había cambios que guardar.');
       $('cfgArchivo').textContent = j.archivo || 'config.properties';
       await cargarConfig();
@@ -1990,6 +2207,7 @@
   }
   new ResizeObserver(ajustarTamano).observe(cv);
   ajustarTamano();
+  aplicarVista();                                  // S13v1: Tiempo real si la dirección termina en #tiempo-real
   actualizarPaneles();
   conectar();
   requestAnimationFrame(bucle);

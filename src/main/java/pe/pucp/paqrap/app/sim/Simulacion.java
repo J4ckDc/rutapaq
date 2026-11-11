@@ -50,8 +50,9 @@ import java.util.Set;
  *
  * Cambios v02:
  *   - Detener ya no termina la simulación: la deja PAUSADA y se puede reanudar (pausar / reanudar).
- *   - Mantenimiento preventivo: la unidad no recibe rutas que crucen su día de mantenimiento y,
- *     durante ese día (00:00 a 23:59), queda en el almacén central fuera de servicio.
+ *   - Mantenimiento preventivo: la unidad no recibe rutas que crucen el inicio de su mantenimiento (00:00 del día
+ *     del plan) y, mientras dura, queda en el almacén central fuera de servicio. S13v1: dura 48 h por defecto para
+ *     todos los tipos (P&R 19, 03/11/2026); antes era el día completo, de 00:00 a 23:59.
  *   - Si el planificador falla, las unidades conservan su itinerario anterior.
  *   - El % a tiempo cuenta también los pedidos vencidos que aún no se entregan.
  *
@@ -86,6 +87,25 @@ import java.util.Set;
  *     de cada unidad, envíos con identificadores de producto y, por almacén, lo que está en tránsito, lo que sale en
  *     las próximas horas y lo entregado en las últimas (panel.ventanaHoras).
  *   - Se guarda la última planificación estable (guardarPlan) para el reporte al terminar el escenario.
+ *
+ * Cambios S13v1 (operación día a día, escenario DIA_A_DIA):
+ *   - El reloj es la fecha y hora actual de Lima (escenario.diario.zona) y K = 1: el tiempo simulado sigue al reloj
+ *     real, aunque la PC se suspenda o el servidor tarde en una vuelta.
+ *   - No se leen los archivos de ventas: los pedidos solo llegan por el registro en línea (registrarPedido), que
+ *     además los guarda en datos/registrados/ventas.aaaamm.txt (RegistroPedidos). Los bloqueos y el mantenimiento sí
+ *     se leen de los archivos, con la fecha real (P&R 7 y 19).
+ *   - Planificación programada cada Sa = Sc = escenario.diario.saMinutos (5 min), alineada al reloj (17:00, 17:05…).
+ *     Además, registrar un pedido o una avería lanza una replanificación inmediata; si el planificador está
+ *     trabajando, queda una sola pendiente que se lanza apenas termina (nunca hay dos ejecuciones a la vez).
+ *   - No hay colapso ni pausa: un pedido vencido se cuenta y se sigue entregando. La operación termina solo con
+ *     cerrarOperaciones (rúbrica G09), que deja el reporte de la última planificación estable.
+ *   - P&R 19 (03/11/2026): el mantenimiento preventivo dura 48 h para todos los tipos (valor por defecto).
+ *   - G07, bloqueos planificados en el planificador: como los bloqueos se conocen de antemano (P&R 7), cada plan
+ *     considera los vigentes y además los que empiezan dentro de planificador.anticipacionBloqueosHoras (1 h por
+ *     defecto; 0 = solo los vigentes, como antes). Las unidades siguen esos mismos caminos (mapaPrevisto), así que no
+ *     entran a una calle que se va a cerrar en ese lapso. Si con los bloqueos futuros algún destino, almacén o unidad
+ *     quedara sin camino, ese plan usa solo los bloqueos vigentes (nunca deja un pedido sin planificar por esto).
+ *     La retícula real (mapa) sigue teniendo solo los bloqueos vigentes: nadie atraviesa un nodo bloqueado.
  */
 public final class Simulacion implements Runnable {
 
@@ -111,11 +131,19 @@ public final class Simulacion implements Runnable {
     private final LocalDateTime inicio;
     private final MapaReticula mapa;
     private final Caminos caminos;
+    /** S13v1 (G07): bloqueos vigentes + los que empiezan dentro de la anticipación; la usan el planificador y los caminos. */
+    private final MapaReticula mapaPrevisto;
+    private final Caminos caminosPrevistos;
+    private final double anticipacionSeg;
+    /** S13v1 (G07): planes en que los bloqueos futuros dejaban algún destino sin camino y se usaron solo los vigentes. */
+    private int planesSoloVigentes;
     private final List<Almacen> almacenes = new ArrayList<>();
     private final List<Unidad> unidades = new ArrayList<>();
     private final Map<String, Unidad> unidadPorId = new HashMap<>();
     private final Map<String, Pedido> pedidos = new LinkedHashMap<>();
     private final List<Bloqueo> bloqueosActivos = new ArrayList<>();
+    /** S13v1 (G07): bloqueos leídos del archivo que empiezan dentro de la anticipación (aún no vigentes). */
+    private final List<Bloqueo> bloqueosProximos = new ArrayList<>();
     private final Planificador planificador;
     private final FuenteDatos fuente;
     private final PlanMantenimiento mantenimiento;
@@ -137,6 +165,10 @@ public final class Simulacion implements Runnable {
     private final int maximoPorEntrega;   // entregas parciales
     private final double duracionSeg;     // 5D: 120 h
     private final double horizonteRutaSeg; // una ruta no dura más que esto (mantenimiento)
+    /** S13v1: zona horaria del reloj de la operación día a día (America/Lima). */
+    private final java.time.ZoneId zona;
+    /** S13v1: archivo donde se guardan los pedidos registrados en la operación día a día (null en las simulaciones). */
+    private final pe.pucp.paqrap.app.datos.RegistroPedidos registro;
 
     private double t;
     private double proximoCiclo;
@@ -210,13 +242,24 @@ public final class Simulacion implements Runnable {
         this.planificador = planificador;
         this.semaforo = new Indicadores(cfg);
         this.reglas = new ReglasAveria(cfg);
-        this.fuente = new FuenteDatos(Path.of(cfg.texto("datos.carpeta", "datos")), inicio);
+        // S13v1: la operación día a día no lee los archivos de ventas (solo los bloqueos)
+        this.fuente = new FuenteDatos(Path.of(cfg.texto("datos.carpeta", "datos")), inicio, escenario != Escenario.DIA_A_DIA);
         this.finDatos = FuenteDatos.finDeVentas(Path.of(cfg.texto("datos.carpeta", "datos")));
         this.mantenimiento = new PlanMantenimiento(Path.of(cfg.texto("datos.carpeta", "datos")), horasMantenimiento(cfg));
         this.mapa = new MapaReticula(cfg.entero("ien.mapaAnchoKm", 70), cfg.entero("ien.mapaAltoKm", 50));
         this.caminos = new Caminos(mapa);
+        // S13v1 (G07): retícula con los bloqueos vigentes y los que empiezan dentro de la anticipación. Con anticipación
+        // 0 es la misma retícula real (comportamiento de las versiones anteriores).
+        this.anticipacionSeg = Math.max(0, cfg.decimal("planificador.anticipacionBloqueosHoras", 1)) * 3600;
+        this.mapaPrevisto = anticipacionSeg > 0 ? new MapaReticula(cfg.entero("ien.mapaAnchoKm", 70), cfg.entero("ien.mapaAltoKm", 50)) : mapa;
+        this.caminosPrevistos = anticipacionSeg > 0 ? new Caminos(mapaPrevisto) : caminos;
 
-        this.cicloSeg = cfg.decimal("ien.scMinutos", 60) * 60;
+        // S13v1: en la operación día a día K = 1, así que Sc = Sa = escenario.diario.saMinutos (5 min por defecto)
+        this.cicloSeg = (escenario == Escenario.DIA_A_DIA ? Math.max(1, cfg.decimal("escenario.diario.saMinutos", 5))
+                : cfg.decimal("ien.scMinutos", 60)) * 60;
+        this.zona = zona(cfg);
+        this.registro = escenario == Escenario.DIA_A_DIA
+                ? new pe.pucp.paqrap.app.datos.RegistroPedidos(Path.of(cfg.texto("datos.carpeta", "datos")).resolve("registrados")) : null;
         this.presupuestoSeg = cfg.planificador().presupuestoSegundos();
         this.margenSeg = cfg.decimal("planificador.margenMinutos", 0) * 60;
         // v0.5: una entrega parcial no puede ser mayor que la unidad más grande de la flota configurada
@@ -261,13 +304,42 @@ public final class Simulacion implements Runnable {
         if (!proximaRecarga.isAfter(inicio)) proximaRecarga = proximaRecarga.plusDays(1);
     }
 
-    /** v0.5: duración del mantenimiento preventivo por tipo de unidad (mantenimiento.horas.auto, .moto, .bici). */
+    /**
+     * v0.5: duración del mantenimiento preventivo por tipo de unidad (mantenimiento.horas.auto, .moto, .bici).
+     * S13v1: 48 h por defecto para todos (P&R 19, respuesta del 03/11/2026).
+     */
     static Map<TipoUnidad, Double> horasMantenimiento(Config cfg) {
         Map<TipoUnidad, Double> h = new java.util.EnumMap<>(TipoUnidad.class);
         for (TipoUnidad t : TipoUnidad.values()) {
-            h.put(t, cfg.decimal("mantenimiento.horas." + t.name().toLowerCase(java.util.Locale.ROOT), 24));
+            h.put(t, cfg.decimal("mantenimiento.horas." + t.name().toLowerCase(java.util.Locale.ROOT), PlanMantenimiento.HORAS_POR_DEFECTO));
         }
         return h;
+    }
+
+    /** S13v1: zona horaria de la operación día a día (escenario.diario.zona; America/Lima si falta o no es válida). */
+    public static java.time.ZoneId zona(Config cfg) {
+        try {
+            return java.time.ZoneId.of(cfg.texto("escenario.diario.zona", "America/Lima").trim());
+        } catch (RuntimeException e) {
+            System.err.println("Zona horaria inválida en escenario.diario.zona; se usa America/Lima");
+            return java.time.ZoneId.of("America/Lima");
+        }
+    }
+
+    /** S13v1: fecha y hora actual en la zona de la operación día a día, al segundo (inicio de una operación). */
+    public static LocalDateTime ahora(Config cfg) {
+        return LocalDateTime.now(zona(cfg)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+    }
+
+    /**
+     * S13v1: siguiente ejecución programada. En la operación día a día queda alineada al reloj (cada 5 min: 17:00,
+     * 17:05…), aunque entre medio haya habido replanificaciones por pedidos o averías. En las simulaciones, Sc después
+     * de esta (como en las versiones anteriores).
+     */
+    private double siguienteCiclo() {
+        if (escenario != Escenario.DIA_A_DIA) return t + cicloSeg;
+        double desdeMedianoche = inicio.toLocalTime().toSecondOfDay();
+        return (Math.floor((desdeMedianoche + t) / cicloSeg + 1e-9) + 1) * cicloSeg - desdeMedianoche;
     }
 
     private void agregarFlota(TipoUnidad tipo, int n, Nodo central) {
@@ -291,7 +363,7 @@ public final class Simulacion implements Runnable {
 
     /** Botón Detener (v02): congela el reloj simulado; todo el estado se conserva para reanudar. */
     public synchronized boolean pausar() {
-        if (estado != Estado.EJECUTANDO) return false;
+        if (estado != Estado.EJECUTANDO || escenario == Escenario.DIA_A_DIA) return false;   // S13v1: el día a día no se pausa
         estado = Estado.PAUSADA;
         return true;
     }
@@ -306,6 +378,26 @@ public final class Simulacion implements Runnable {
     /** Termina la simulación definitivamente (se usa al iniciar otra). */
     public void cancelar() {
         cancelada = true;
+    }
+
+    /**
+     * S13v1: botón "Cerrar operaciones" (rúbrica G09). Termina la operación día a día; queda el reporte de la última
+     * planificación estable (planJson, planCsv). Devuelve false si no es la operación día a día o ya terminó.
+     */
+    public synchronized boolean cerrarOperaciones() {
+        if (escenario != Escenario.DIA_A_DIA || estado == Estado.TERMINADA) return false;
+        terminar("Operaciones cerradas el " + instante(t).withNano(0).format(java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm")),
+                "CIERRE");
+        return true;
+    }
+
+    public Escenario escenario() {
+        return escenario;
+    }
+
+    /** S13v1: fecha y hora actual del escenario (en la operación día a día, la hora de Lima). */
+    public synchronized String horaActual() {
+        return instante(t).withNano(0).toString();
     }
 
     public Estado estado() {
@@ -339,7 +431,13 @@ public final class Simulacion implements Runnable {
                 ultimo = ahoraNs;
                 synchronized (this) {
                     revisarPlanEnCurso();                 // v0.5: aplica el plan si el planificador ya terminó
-                    if (estado == Estado.EJECUTANDO) {      // en pausa el reloj simulado no avanza
+                    if (estado == Estado.EJECUTANDO && escenario == Escenario.DIA_A_DIA) {
+                        // S13v1: el reloj de la operación es la hora actual (K = 1), sin tope por vuelta: si la PC
+                        // se suspende, al volver se pone al día en lugar de quedarse atrasada
+                        nsReales += transcurrido;
+                        double objetivo = Duration.between(inicio, LocalDateTime.now(zona)).toNanos() / 1e9;
+                        if (objetivo > t) avanzar(objetivo - t);
+                    } else if (estado == Estado.EJECUTANDO) {      // en pausa el reloj simulado no avanza
                         nsReales += transcurrido;
                         avanzar(factor * transcurrido / 1e9);
                     } else if (estado == Estado.PAUSADA && planEnCurso == null && t >= proximoCiclo) {
@@ -457,8 +555,18 @@ public final class Simulacion implements Runnable {
         }
 
         // 2. bloqueos que empiezan o terminan (se aplican sobre la retícula del planificador)
-        boolean cambio = false;
-        for (Bloqueo b : fuente.bloqueosHasta(ahora)) {
+        //    S13v1 (G07): se leen con anticipación; los que aún no empiezan esperan en bloqueosProximos
+        boolean cambio = false, cambioPrevisto = false;
+        for (Bloqueo b : fuente.bloqueosHasta(instante(t + anticipacionSeg))) {
+            if (b.fin().isAfter(ahora)) {
+                bloqueosProximos.add(b);
+                cambioPrevisto = true;
+            }
+        }
+        for (java.util.Iterator<Bloqueo> it = bloqueosProximos.iterator(); it.hasNext(); ) {
+            Bloqueo b = it.next();
+            if (b.inicio().isAfter(ahora)) continue;
+            it.remove();
             if (b.fin().isAfter(ahora)) {
                 bloqueosActivos.add(b);
                 cambio = true;
@@ -470,6 +578,12 @@ public final class Simulacion implements Runnable {
             // v0.5 (B01): si el mapa configurado es más chico que los datos, se ignoran los nodos que quedan fuera
             for (Bloqueo b : bloqueosActivos) for (Nodo n : b.nodos()) if (mapa.dentro(n.x(), n.y())) mapa.bloquear(caminos.indice(n));
         }
+        if (mapaPrevisto != mapa && (cambio || cambioPrevisto)) {
+            mapaPrevisto.limpiarBloqueos();
+            for (List<Bloqueo> l : List.of(bloqueosActivos, bloqueosProximos)) {
+                for (Bloqueo b : l) for (Nodo n : b.nodos()) if (mapaPrevisto.dentro(n.x(), n.y())) mapaPrevisto.bloquear(caminos.indice(n));
+            }
+        }
 
         // 3. recarga diaria de los almacenes intermedios (23:59:59)
         while (!ahora.isBefore(proximaRecarga)) {
@@ -478,7 +592,7 @@ public final class Simulacion implements Runnable {
         }
 
         // 3b. mantenimiento preventivo (v02): entra a las 00:00 del día indicado; v0.5: sale al cumplir la duración
-        //     de su tipo (mantenimiento.horas.*, 24 h por defecto)
+        //     de su tipo (mantenimiento.horas.*; S13v1: 48 h por defecto, P&R 19 del 03/11/2026)
         for (Unidad u : unidades) {
             boolean toca = mantenimiento.enMantenimiento(u.id, ahora);
             if (toca && !u.enMantenimiento) entrarMantenimiento(u);
@@ -493,11 +607,11 @@ public final class Simulacion implements Runnable {
         if (t >= proximoCiclo) {
             if (!asincrono) {
                 planificar();
-                proximoCiclo = t + cicloSeg;
+                proximoCiclo = siguienteCiclo();
                 if (estado != Estado.EJECUTANDO) return;
             } else if (planEnCurso == null) {
                 lanzarPlan(adelanto());
-                proximoCiclo = t + cicloSeg;
+                proximoCiclo = siguienteCiclo();             // S13v1: en el día a día, alineado al reloj
             } else if (escenario == Escenario.COLAPSO) {
                 // v0.5, criterio C: toca la siguiente ejecución y la anterior aún no termina (Ta >= Sa)
                 colapso("C", String.format("el planificador aún no terminaba cuando tocaba la siguiente ejecución "
@@ -543,8 +657,8 @@ public final class Simulacion implements Runnable {
     }
 
     /**
-     * Inicio del día de mantenimiento. La planificación ya evita asignarle rutas que crucen las 00:00
-     * (ver planificar), así que normalmente la unidad está libre. Si aún tuviera paradas, según el curso
+     * Inicio del mantenimiento (00:00 del día del plan; dura 48 h por defecto). La planificación ya evita asignarle
+     * rutas que crucen esas 00:00 (ver planificar), así que normalmente la unidad está libre. Si aún tuviera paradas, según el curso
      * "debe retornar de inmediato": sus entregas pendientes vuelven a planificarse y la unidad pasa al
      * almacén central con su carga (traslado instantáneo, como en las averías tipo 2 y 3).
      * v03: si tenía una avería tipo 2 o 3 y seguía en el lugar, pasa al almacén central con lo no trasvasado
@@ -582,10 +696,18 @@ public final class Simulacion implements Runnable {
         return mapa.getAlto() - 1;
     }
 
-    /** Registro en línea (operación día a día). Se planifica en el siguiente paso. */
+    /**
+     * Registro en línea (operación día a día). Se planifica en el siguiente paso: S13v1, además de la ejecución
+     * programada cada Sa, se pide una replanificación inmediata (si el planificador está trabajando, se lanza apenas
+     * termine). En la operación día a día el pedido también se guarda en datos/registrados/ventas.aaaamm.txt.
+     */
     public synchronized String registrarPedido(String cliente, Nodo nodo, int cantidad, int plazoHoras) {
+        if (estado == Estado.TERMINADA) throw new IllegalStateException("La operación ya terminó");
+        int antes = contador;
         agregarPedido(cliente, nodo, cantidad, plazoHoras, t);
-        proximoCiclo = t;
+        if (contador == antes) throw new IllegalArgumentException("El pedido está fuera del mapa o no tiene productos");
+        proximoCiclo = Math.min(proximoCiclo, t);
+        if (registro != null) registro.agregar(instante(t), nodo.x(), nodo.y(), cliente, cantidad, plazoHoras);
         return "P" + contador;
     }
 
@@ -887,7 +1009,9 @@ public final class Simulacion implements Runnable {
         if (cartera.isEmpty()) return null;
 
         // v0.5: en el servidor el planificador recibe una copia del mapa: los bloqueos pueden cambiar mientras trabaja
-        MapaReticula m = asincrono ? mapa.copia() : mapa;
+        // S13v1 (G07): la retícula con los bloqueos que empiezan dentro de la anticipación, si no deja nada sin camino
+        MapaReticula base = mapaParaPlanificar(alm, flota, cartera);
+        MapaReticula m = asincrono ? base.copia() : base;
         return new Preparacion(new InstanciaPlanificacion(m, alm, flota, cartera, instante(t0), cfg.planificador()),
                 original, lotes, liberadas, conAveria, t0);
     }
@@ -1175,9 +1299,46 @@ public final class Simulacion implements Runnable {
         return soltadas;
     }
 
-    /** km entre dos nodos respetando bloqueos (Manhattan si no hay camino). */
+    /**
+     * S13v1 (G07): retícula para el planificador. Usa la de los bloqueos previstos (vigentes y los que empiezan dentro
+     * de la anticipación) salvo que con ella algún almacén, unidad o destino quede sin camino y con la real no: en ese
+     * caso este plan usa solo los bloqueos vigentes, como en las versiones anteriores.
+     */
+    private MapaReticula mapaParaPlanificar(List<pe.pucp.paqrap.planner.model.Almacen> alm, List<Vehiculo> flota,
+                                            List<pe.pucp.paqrap.planner.model.Pedido> cartera) {
+        if (mapaPrevisto == mapa || mapaPrevisto.nodosBloqueados() == mapa.nodosBloqueados()) return mapa;
+        int central = caminos.indice(almacenes.get(0).nodo);
+        for (Almacen a : almacenes) if (a.infinito()) central = caminos.indice(a.nodo);
+        int[] prev = mapaPrevisto.distanciasDesde(central);
+        int[] real = null;
+        List<Integer> interes = new ArrayList<>();
+        for (var a : alm) interes.add(a.getNodo());
+        for (Vehiculo v : flota) interes.add(v.getNodoActual());
+        for (var p : cartera) interes.add(p.getNodo());
+        for (int n : interes) {
+            if (prev[n] >= 0) continue;
+            if (real == null) real = mapa.distanciasDesde(central);
+            if (real[n] >= 0) {
+                planesSoloVigentes++;
+                return mapa;
+            }
+        }
+        return mapaPrevisto;
+    }
+
+    /**
+     * S13v1 (G07): camino de una unidad evitando también los bloqueos que empiezan dentro de la anticipación (los mismos
+     * que consideró el planificador); si así no hay camino, el que respeta solo los vigentes.
+     */
+    private List<Nodo> camino(Nodo a, Nodo b) {
+        List<Nodo> c = caminosPrevistos.camino(a, b);
+        return c != null ? c : caminos.camino(a, b);
+    }
+
+    /** km entre dos nodos respetando bloqueos (Manhattan si no hay camino). S13v1: con los bloqueos previstos. */
     private double km(Nodo a, Nodo b) {
-        int d = caminos.distancia(a, b);
+        int d = caminosPrevistos.distancia(a, b);
+        if (d < 0) d = caminos.distancia(a, b);
         return d < 0 ? a.manhattan(b) : d;
     }
 
@@ -1270,7 +1431,7 @@ public final class Simulacion implements Runnable {
                     u.paradas.pollFirst();
                     continue;
                 }
-                List<Nodo> c = caminos.camino(u.nodo, p.nodo());
+                List<Nodo> c = camino(u.nodo, p.nodo());          // S13v1: evita también los bloqueos previstos
                 if (c == null) return;                           // sin camino por bloqueos: espera
                 u.camino.addAll(c);
                 u.progreso = 0;
@@ -1280,7 +1441,7 @@ public final class Simulacion implements Runnable {
             Nodo sig = u.camino.peekFirst();
             if (p != null && u.progreso == 0 && !sig.equals(p.nodo()) && caminos.bloqueado(sig)) {
                 u.camino.clear();                                // apareció un bloqueo: recalcular
-                List<Nodo> c = caminos.camino(u.nodo, p.nodo());
+                List<Nodo> c = camino(u.nodo, p.nodo());
                 if (c == null) return;
                 u.camino.addAll(c);
                 continue;
@@ -1447,6 +1608,10 @@ public final class Simulacion implements Runnable {
                 .append(",\"factor\":").append(Json.num(factor))
                 .append(",\"scMin\":").append(Json.num(cicloSeg / 60.0))
                 .append(",\"saSeg\":").append(Json.num(cicloSeg / factor))
+                // S13v1 (G07): bloqueos que el planificador considera con anticipación
+                .append(",\"anticipacionBloqueosHoras\":").append(Json.num(anticipacionSeg / 3600))
+                .append(",\"bloqueosPrevistos\":").append(bloqueosProximos.size())
+                .append(",\"planesSoloVigentes\":").append(planesSoloVigentes)
                 .append(",\"ciclos\":").append(ciclos)
                 .append(",\"msUltimoPlan\":").append(msUltimoPlan)
                 .append(",\"msMaximoPlan\":").append(msMaximoPlan)
@@ -1530,19 +1695,36 @@ public final class Simulacion implements Runnable {
         Map<String, List<String>> transito = new HashMap<>(), porSalir = new HashMap<>();
         Map<String, int[]> totTransito = new HashMap<>(), totPorSalir = new HashMap<>();   // {envíos, paquetes}
         Map<String, Integer> aBordo = new HashMap<>();
+        // S13v1 (E20): unidades en camino hacia cada almacén: hora de llegada, paquetes que traen y que recargarán
+        Map<String, List<String>> llegan = new HashMap<>();
+        Map<String, int[]> totLlegan = new HashMap<>();                                    // {unidades, paquetes que traen}
         for (Unidad u : unidades) {
             if (u.carga > 0 && u.averia == null) aBordo.merge(u.origenId, u.carga, Integer::sum);
             double[][] h = horas.get(u);
             int[][] pr = prod.get(u);
             String de = u.origenId;
             double sale = u.salidaOrigen;
+            int cargaEnRuta = u.carga;                     // S13v1: carga estimada al llegar a cada parada
             int i = 0;
             for (Parada p : u.paradas) {
                 if (p.tipo() == Parada.Tipo.RECARGA) {
                     vanARecargar.computeIfAbsent(p.almacenId(), k -> new LinkedHashSet<>()).add(u.id);
+                    int recarga = esTrasvase(p.almacenId()) ? p.cantidad()
+                            : soloLoNecesario ? Math.min(u.tipo.capacidad() - cargaEnRuta, p.cantidad()) : u.tipo.capacidad() - cargaEnRuta;
+                    recarga = Math.max(0, recarga);
+                    if (!esTrasvase(p.almacenId())) {
+                        int[] tl = totLlegan.computeIfAbsent(p.almacenId(), k -> new int[2]);
+                        tl[0]++;
+                        tl[1] += cargaEnRuta;
+                        List<String> l = llegan.computeIfAbsent(p.almacenId(), k -> new ArrayList<>());
+                        if (l.size() < 150) l.add("{\"u\":" + Json.str(u.id) + ",\"ll\":" + Math.round(h[i][0])
+                                + ",\"trae\":" + cargaEnRuta + ",\"recarga\":" + recarga + ",\"de\":" + Json.str(de) + "}");
+                    }
+                    cargaEnRuta = Math.min(u.tipo.capacidad(), cargaEnRuta + recarga);
                     de = p.almacenId();
                     sale = h[i][1];
                 } else if (p.tipo() == Parada.Tipo.ENTREGA) {
+                    cargaEnRuta = Math.max(0, cargaEnRuta - p.cantidad());
                     atendidoPor.computeIfAbsent(p.pedidoId(), k -> new LinkedHashSet<>()).add(u.id);
                     Pedido ped = pedidos.get(p.pedidoId());
                     String e = "{\"u\":" + Json.str(u.id) + ",\"q\":" + p.cantidad()
@@ -1586,6 +1768,10 @@ public final class Simulacion implements Runnable {
             }
             b.append(",\"recargan\":");
             lista(b, vanARecargar.getOrDefault(a.id, Set.of()));
+            // S13v1 (E20): lo que viene en camino al almacén (unidades que llegan a recargar, con lo que traen)
+            int[] tll = totLlegan.getOrDefault(a.id, new int[2]);
+            b.append(",\"llegan\":{\"unidades\":").append(tll[0]).append(",\"paquetes\":").append(tll[1])
+                    .append(",\"lista\":[").append(String.join(",", llegan.getOrDefault(a.id, List.of()))).append("]}");
             // v0.5: envíos en tránsito, por salir y entregados en la ventana (panel de almacenes)
             int[] tt = totTransito.getOrDefault(a.id, new int[2]), ts = totPorSalir.getOrDefault(a.id, new int[2]);
             b.append(",\"aBordo\":").append(aBordo.getOrDefault(a.id, 0))
@@ -1853,6 +2039,24 @@ public final class Simulacion implements Runnable {
 
     synchronized LocalDateTime ahora() {
         return instante(t);
+    }
+
+    // ---- S13v1: acceso para las pruebas de la operación día a día
+
+    synchronized int ciclos() {
+        return ciclos;
+    }
+
+    synchronized int recibidos() {
+        return recibidos;
+    }
+
+    synchronized int vencidos() {
+        return vencidos;
+    }
+
+    synchronized String tipoFin() {
+        return tipoFin;
     }
 
     private static void lista(StringBuilder b, Iterable<String> valores) {

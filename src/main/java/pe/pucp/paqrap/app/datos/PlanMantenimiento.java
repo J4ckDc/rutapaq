@@ -26,12 +26,15 @@ import java.util.Set;
  *     para todos los meses impares y lo indicado para octubre (mes par), para todos los pares.
  *
  * v0.5: la duración depende del tipo de unidad y se configura en horas (mantenimiento.horas.auto, .moto, .bici).
- * Por defecto 24 h para todos (00:00 a 23:59, lo que dice el archivo del profesor). La P&R tiene un borrador aún
- * no confirmado: bicicleta 1 turno (hasta las 07:00, 7 h), moto 1 día (24 h), auto 2 días (48 h).
+ * S13v1: por defecto 48 h para todos los tipos, según la respuesta del profesor a la P&R 19 (03/11/2026): "todos los
+ * mantenimientos planificados, independiente del tipo de unidad, no están disponibles por 48 horas".
  *
  * Se leen todos los archivos de la carpeta de datos cuyo nombre empieza con "mant.preventivo".
  */
 public final class PlanMantenimiento {
+    /** S13v1: duración por defecto del mantenimiento, en horas (P&R 19, 03/11/2026). */
+    public static final double HORAS_POR_DEFECTO = 48.0;
+
     private static final DateTimeFormatter AAAAMMDD = DateTimeFormatter.ofPattern("yyyyMMdd");
 
     /** paridad del mes (0 par, 1 impar) → día del mes → unidades en mantenimiento. */
@@ -45,10 +48,10 @@ public final class PlanMantenimiento {
         this(carpeta, Map.of());
     }
 
-    /** @param horasPorTipo duración en horas por tipo; los tipos que falten usan 24 h. */
+    /** @param horasPorTipo duración en horas por tipo; los tipos que falten usan HORAS_POR_DEFECTO (48 h). */
     public PlanMantenimiento(Path carpeta, Map<TipoUnidad, Double> horasPorTipo) {
         for (TipoUnidad t : TipoUnidad.values()) {
-            double h = horasPorTipo.getOrDefault(t, 24.0);
+            double h = horasPorTipo.getOrDefault(t, HORAS_POR_DEFECTO);
             if (h <= 0) throw new IllegalArgumentException("La duración del mantenimiento debe ser positiva: " + t);
             horas.put(t, h);
         }
@@ -91,7 +94,7 @@ public final class PlanMantenimiento {
     /** v0.5: duración del mantenimiento de la unidad, en segundos (según su tipo). */
     public long segundosDuracion(String unidad) {
         TipoUnidad t = TipoUnidad.deCodigo(unidad);
-        return Math.round(horas.getOrDefault(t, 24.0) * 3600);
+        return Math.round(horas.getOrDefault(t, HORAS_POR_DEFECTO) * 3600);
     }
 
     /** v0.5: ¿la unidad está en mantenimiento en ese instante? */
