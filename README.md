@@ -1,4 +1,4 @@
-# RUTAPAQ v0.5.0: servidor, simulación y visualizador con rutapaq-planner (ALNS y GA)
+# RUTAPAQ rutapaqS13v1: servidor, operación día a día, simulación y visualizador con rutapaq-planner (ALNS y GA)
 
 Un solo proceso Java 17 **sin dependencias en ejecución**. Contiene el código de
 **rutapaq-planner v2.0** (`pe.pucp.paqrap.planner`: ALNS_PAQRAP, HGS_PAQRAP, EvaluadorItinerario y
@@ -19,12 +19,64 @@ Alcance de la v0.5.0: revisión de la v0.4.1 (rutapaqS12v1) frente a la situaci�
 evaluación (equipo de 4: se cumplen los ítems Sí3 y Sí4). Las decisiones del equipo están en el documento
 "Historial de cambios y decisiones" del proyecto.
 
+Alcance de rutapaqS13v1: el escenario de **operaciones día a día** (menú **Tiempo real**), con registro de pedidos y
+averías en línea y cierre de operaciones con el reporte de la última planificación estable (G09). Parte de
+rutapaqS12v3 y conserva el diseño del visualizador.
+
+## Cambios de rutapaqS13v1 respecto de rutapaqS12v3
+
+| # | Cambio | Rúbrica / P&R | Dónde |
+|---|---|---|---|
+| 1 | **Operación día a día independiente del Simulador de rutas.** Arranca sola con el servidor y corre en paralelo: iniciar, detener o reemplazar un 5 Días o un Colapso no la afecta. Cada navegador elige qué vista mira (Tiempo real o Simulador de rutas) sin afectar a los demás. | Situación auténtica (3 escenarios); C05, C06, G06 | `Servidor`, `app.js` |
+| 2 | **Reloj = fecha y hora actual de Lima** (`escenario.diario.zona=America/Lima`), con K = 1, aunque el servidor o la VM estén en UTC. Si la PC se suspende, al volver la operación se pone al día. | C12 a C16 | `Simulacion` |
+| 3 | **Sin archivos de ventas**: los pedidos solo llegan por el registro en línea. Los **bloqueos** y el **mantenimiento** sí se leen de los archivos de `datos/`, con la fecha real (los bloqueos son planificados con antelación). | Necesidad (i); B16; P&R 7 y 19 | `FuenteDatos`, `Simulacion` |
+| 4 | **Planificación programada cada `escenario.diario.saMinutos` (5 min)**, alineada al reloj (17:00, 17:05…). Como K = 1, Sa = Sc. Además, **registrar un pedido o una avería replanifica de inmediato**; si el planificador está trabajando, queda una sola replanificación pendiente que se lanza apenas termina (nunca hay dos a la vez). Las replanificaciones extra no corren la programada. | A17 a A19; planificación programada | `Simulacion.siguienteCiclo`, `registrarPedido` |
+| 5 | **Registrar pedido** (botón de la barra superior en Tiempo real): x, y (también con un clic en el mapa), cantidad, plazo (4, 8, 12, 18 o 36 h) y cliente. El plazo se cuenta desde el momento del registro. Al registrarlo se selecciona en el mapa. | Necesidad (i); B16 | `index.html`, `app.js`, `POST /api/pedidos` |
+| 6 | **Registro histórico de pedidos**: cada pedido registrado se agrega a `datos/registrados/ventas.aaaamm.txt`, con el formato de los archivos del profesor. Está en una subcarpeta para no mezclarse con los datos del profesor. Es solo un registro: si el servidor se reinicia, la operación en curso no se recupera. | B13 | `RegistroPedidos` |
+| 7 | **Averías en tiempo real**: el mismo registro manual de siempre, aplicado a la vista que se está mirando. | B07 a B09; D10 a D13 | `Servidor`, `app.js` |
+| 8 | **Sin colapso ni pausa** en el día a día: un pedido vencido se cuenta como vencido y se sigue entregando (plazo de 36 h, prioridad más baja), y la operación continúa. | Decisión del equipo | `Simulacion` |
+| 9 | **Cerrar operaciones** (con confirmación): termina la operación para todos los navegadores y muestra el reporte de la última planificación estable con sus indicadores, CSV e impresión. **Reabrir operaciones** abre una nueva desde la hora actual, con la flota en el almacén central y la configuración guardada. | G09 | `Simulacion.cerrarOperaciones`, `Servidor`, `app.js` |
+| 10 | **Barra superior en Tiempo real**: fecha y hora actual y tiempo de operación (sin fecha de inicio, sin selector 5 Días / Colapso y sin Iniciar/Detener). El menú "Tiempo real" ya está habilitado. | C12 a C16 | `index.html`, `app.js`, `estilos.css` |
+| 11 | **Mantenimiento preventivo de 48 h** para los tres tipos de unidad (respuesta del profesor a la P&R 19 del 03/11/2026). | P&R 19 | `PlanMantenimiento`, `config.properties` |
+| 12 | **Pantalla Configuración**: nueva sección "Operación día a día" (planificar cada N minutos). Lo que antes regía "al iniciar la próxima simulación" ahora también rige al reabrir las operaciones; velocidad y reglas de averías se aplican a la simulación y a la operación en curso. | B04, B07 a B09 | `CatalogoConfiguracion`, `Servidor` |
+| 13 | **Lo que llega a cada almacén** (pestaña Almacenes): nueva sección "En camino al almacén" con las unidades que van a recargar allí, su hora de llegada, los paquetes que traen y los que recargarán. "En tránsito" pasa a llamarse "En tránsito (salieron de aquí)". | E20 | `Simulacion.snapshotJson` (campo `llegan`), `app.js` |
+| 14 | **Bloqueos planificados en el planificador**: como los bloqueos se conocen de antemano (P&R 7), cada plan considera los vigentes y además los que empiezan dentro de `planificador.anticipacionBloqueosHoras` (1 h por defecto; 0 = solo los vigentes, como antes). Las unidades siguen esos mismos caminos, así que no entran a una calle que se cerrará en ese lapso. Si con los bloqueos futuros algún almacén, unidad o destino quedara sin camino, ese plan usa solo los vigentes. En el mapa se siguen dibujando solo los vigentes y nadie atraviesa un nodo bloqueado. El resumen final muestra la anticipación usada. | G07; P&R 7 | `Simulacion` (`mapaPrevisto`, `mapaParaPlanificar`, `camino`), `config.properties` |
+
+Endpoints nuevos o cambiados:
+
+| Endpoint | Qué hace |
+|---|---|
+| `GET /api/stream?vista=operacion`, `GET /api/estado?vista=operacion` | Estado de la operación día a día (sin `vista`, el del simulador) |
+| `POST /api/pedidos?x=&y=&cantidad=&plazo=&cliente=` | Registra un pedido en la operación día a día (con `vista=simulacion`, en la simulación en curso) |
+| `POST /api/averias?vista=operacion&unidad=&tipo=`, `GET /api/averias?vista=operacion` | Averías de la operación día a día |
+| `GET /api/plan?vista=operacion`, `GET /api/plan.csv?vista=operacion` | Última planificación estable de la operación día a día |
+| `POST /api/operacion/cerrar`, `POST /api/operacion/reabrir` | Cierra la operación (G09) o abre una nueva desde la hora actual |
+| `POST /api/simulacion?escenario=DIA_A_DIA` | Ya no se acepta: la operación día a día está aparte |
+
+Claves nuevas en `config.properties`: `escenario.diario.zona`, `escenario.diario.saMinutos` y
+`planificador.anticipacionBloqueosHoras`; `mantenimiento.horas.*` pasa a 48. Al desplegar, copiar también el `config.properties` nuevo.
+
+Resultado de referencia (5 días desde el 01/01/2026, sin interfaz): **76 recibidos, 75 entregados (100 % a tiempo),
+S/ 10 300**. Antes era 74 entregados y S/ 10 184: el mantenimiento de 48 h lleva a 75 y S/ 10 252, y la anticipación de
+bloqueos de 1 h a S/ 10 300 (desvíos un poco más largos). Con `planificador.anticipacionBloqueosHoras=0` da
+exactamente S/ 10 252.
+
+Con más demanda, la anticipación de bloqueos ayuda (medido sin interfaz, en el entorno de pruebas; el ALNS se corta
+por tiempo, así que hay variación entre corridas): 5 días desde el 01/06/2027, 90,0 % a tiempo y 171 vencidos frente a
+89,3 % y 182 sin anticipación; colapso desde el 01/03/2027, Tc = 146,7 h frente a 107,6 h. Ta máximo sin cambios
+(~2 s, el tope de cómputo).
+
+Limitación conocida: la capacidad, la velocidad y el costo de cada tipo de unidad son comunes a la operación y al
+simulador. Si se cambia la capacidad o el costo en Configuración y luego se inicia una simulación, el cambio también
+llega a la operación en curso. Por eso conviene cambiar la flota solo antes de una presentación, no durante
+(P&R 18).
+
 ## Cambios de la v0.5.0 respecto de la v0.4.1
 
 | # | Cambio | Rúbrica / P&R | Dónde |
 |---|---|---|---|
 | 1 | **Flota en una sola fuente configurable**: capacidad, velocidad y costo por km de cada tipo se leen de las claves `flota.auto.*`, `flota.moto.*`, `flota.bici.*`. `TipoUnidad` (simulación) ya no tiene valores propios: los toma de `TipoVehiculo` (planificador), así nunca difieren. Prepara el cambio de velocidad en caliente (pendiente). | B04; P&R 6, 15 y 16 | `planner/model/TipoVehiculo`, `app/modelo/TipoUnidad`, `Config`, `Configuracion`, `planner.properties` |
-| 2 | **Duración del mantenimiento por tipo** (`mantenimiento.horas.auto`, `.moto`, `.bici`), por ahora 24 h para todos como en el archivo del profesor. Borrador de la P&R aún no confirmado: bicicleta hasta las 07:00 (7 h), moto 24 h, auto 48 h. | P&R 19 | `app/datos/PlanMantenimiento`, `Simulacion` |
+| 2 | **Duración del mantenimiento por tipo** (`mantenimiento.horas.auto`, `.moto`, `.bici`), por ahora 24 h para todos como en el archivo del profesor. Borrador de la P&R aún no confirmado: bicicleta hasta las 07:00 (7 h), moto 24 h, auto 48 h. **Desde rutapaqS13v1: 48 h para todos** (P&R 19, 03/11/2026). | P&R 19 | `app/datos/PlanMantenimiento`, `Simulacion` |
 | 3 | **Recarga configurable** (`recarga.soloLoNecesario`, `false` por defecto): la unidad se sigue llenando hasta su capacidad (decisión del equipo tras comparar ambas formas: cargar solo lo necesario costó 2–9 % más y dio más vencidos con demanda alta). | P&R 20 | `Simulacion` |
 | 4 | **Semáforo + vacío**: nuevo nivel `VACIO` (gris). Regla: el rojo siempre es peligro. Almacenes: verde bastante stock, ámbar poco, rojo muy poco, vacío 0. La carga de una unidad usa el mismo criterio (antes una unidad llena era roja). | B06, C21, C27, E03, E19 | `Indicadores`, `config.properties` |
 | 5 | **Indicadores globales** en el panel izquierdo: ocupación de la flota en servicio y stock de los almacenes intermedios en conjunto, con semáforo + vacío. | G01 a G04 | `index.html`, `app.js`, `snapshotJson` |
@@ -183,7 +235,13 @@ Si se modifica el código, recompilar antes de volver a ejecutar:
 mvn package && cp target/rutapaq.jar .   # con Maven (también corre las pruebas)
 ```
 
-En el navegador: elegir la fecha y hora de inicio (hay datos de enero 2026 a diciembre 2028) y
+**Tiempo real** (operación día a día): se abre sola al arrancar el servidor, a la hora actual de Lima. Para verla, elegir
+**Tiempo real** en el menú (o abrir `http://localhost:8080/#tiempo-real`). **Registrar pedido** agrega un pedido en
+ese momento (la ubicación se puede elegir con un clic en el mapa); las averías se registran igual que en el simulador.
+**Cerrar operaciones** termina la operación y muestra el reporte de la última planificación estable; **Reabrir
+operaciones** abre una nueva desde la hora actual.
+
+**Simulador de rutas**: elegir la fecha y hora de inicio (hay datos de enero 2026 a diciembre 2028) y
 **Iniciar**. **Detener** pausa la simulación y **Reanudar** la continúa; **Iniciar** de nuevo descarta la
 actual y empieza otra. Los 5 días duran `escenario.semanal.minutosReales` minutos reales (30 por defecto).
 Con **Colapso** elegido en la barra superior, la simulación sigue hasta el colapso (o hasta que se acaben los datos)
@@ -272,7 +330,7 @@ Las averías solo se registran de forma manual desde el visualizador (v0.4.1); n
 | Archivo | Qué contiene |
 |---|---|
 | `planner.properties` (de rutapaq-planner) | Mapa, almacenes, flota (cantidad y, desde la v0.5.0, `flota.*.capacidad`, `.velocidadKmh`, `.costoKm`), Sc, Sa, P, parámetros de ALNS y GA |
-| `config.properties` | Servidor, algoritmo, escenarios (fecha y hora propuestas, duración del 5D), averías (`averia.tipo1.horas`, `averia.enLugar.horas`, `averia.tipo3.diasMinimos`, `averia.tipo3.horaRetorno`, `averia.trasvase.*`), frecuencia de publicación, semáforo (`semaforo.plazo.*`, `semaforo.almacen.*`, `semaforo.carga.*`, `semaforo.flota.*`, `semaforo.pedido.*`) y, desde la v0.5.0, `panel.ventanaHoras`, `recarga.soloLoNecesario` y `mantenimiento.horas.*` |
+| `config.properties` | Servidor, algoritmo, escenarios (fecha y hora propuestas, duración del 5D), averías (`averia.tipo1.horas`, `averia.enLugar.horas`, `averia.tipo3.diasMinimos`, `averia.tipo3.horaRetorno`, `averia.trasvase.*`), frecuencia de publicación, semáforo (`semaforo.plazo.*`, `semaforo.almacen.*`, `semaforo.carga.*`, `semaforo.flota.*`, `semaforo.pedido.*`) y, desde la v0.5.0, `panel.ventanaHoras`, `recarga.soloLoNecesario` y `mantenimiento.horas.*` (48 h desde rutapaqS13v1); desde rutapaqS13v1, `escenario.diario.zona`, `escenario.diario.saMinutos` y `planificador.anticipacionBloqueosHoras` |
 
 Un `config.properties` junto al jar sobrescribe cualquier clave de los dos archivos, sin recompilar.
 
@@ -281,13 +339,13 @@ Un `config.properties` junto al jar sobrescribe cualquier clave de los dos archi
 | Paquete | Qué hace |
 |---|---|
 | `pe.pucp.paqrap.planner.*` | rutapaq-planner v2.0 (`model`, `core`, `alns`, `hgs`, `ien`); en la v02 solo cambió el formato que aceptan los lectores del IEN; en la v03 se agrega el depósito temporal de trasvase (`TipoAlmacen.TRASVASE`), sin efecto en el banco del IEN |
-| `app.sim.Simulacion` | Reloj, estado en memoria, ciclo de planificación con rutapaq-planner, ejecución, averías, colapso |
+| `app.sim.Simulacion` | Reloj, estado en memoria, ciclo de planificación con rutapaq-planner, ejecución, averías, colapso; S13v1: operación día a día (reloj de Lima, sin ventas, cierre) |
 | `app.sim.ReglasAveria`, `app.modelo.Averia` | v03: reglas de los 3 tipos de avería y registro de cada avería (fases, trasvases, devueltos) |
 | `app.sim.Caminos` | Caminos nodo a nodo sobre la `MapaReticula` del planner |
 | `app.sim.Planificadores` | Crea `ALNS_PAQRAP` o `HGS_PAQRAP` según la configuración |
 | `app.sim.Indicadores` | Semáforo con umbrales configurables |
-| `app.datos` | Lectura de ventas y bloqueos línea por línea, y plan de mantenimiento |
-| `app.web.Servidor` | REST, SSE y archivos del visualizador |
+| `app.datos` | Lectura de ventas y bloqueos línea por línea, plan de mantenimiento y, S13v1, registro de los pedidos en línea (`RegistroPedidos`) |
+| `app.web.Servidor` | REST, SSE y archivos del visualizador; S13v1: la operación día a día y la simulación como dos instancias |
 | `resources/web` | Visualizador (Canvas 2D + EventSource) |
 
 ## Desplegar en la VM de AWS (Ubuntu 24.04)
@@ -306,3 +364,6 @@ Copiar a la VM `rutapaq.jar`, `config.properties`, `datos/` y `deploy/`, y ejecu
   el tramo en curso al cerrar la ventana.
 - El evaluador cuenta el refrigerio antes de la siguiente llegada; aquí la unidad lo toma al llegar al
   nodo de esa parada, antes de atenderla (misma hora de atención).
+- rutapaqS13v1: el planificador considera los bloqueos que empiezan dentro de
+  `planificador.anticipacionBloqueosHoras` (1 h), no todos los del archivo como dice el informe del experimento
+  (sección 2.4). Con 0 se usan solo los vigentes.
